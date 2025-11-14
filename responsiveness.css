@@ -1,0 +1,207 @@
+/* ====================================================================
+   RESPONSIVENESS — flexible knobs with your proven working defaults
+   NOTE: Defaults match your snippet exactly. Tweak variables only.
+   ==================================================================== */
+
+/* Hidden by default; app.js creates and inserts this just under .nav/.stage */
+#topDock { display: none; }
+
+/* ------------------------------
+   Global knobs (change numbers here)
+   ------------------------------ */
+:root {
+  /* Layout constants */
+  --nav-height: 64px;                 /* base navbar height from style.css */
+
+  /* Mobile — OFFER (end screen) defaults (your values) */
+  --offer-stage-top-padding-mobile: 76px;  /* = 64px nav + ~12px breathing */
+  --topdock-margin-top: 30px;              /* space under nav/timer → webcam */
+  --topdock-margin-bottom: 50px;           /* space under webcam → offer */
+  --topdock-padding-x: 12px;               /* left/right padding inside dock */
+
+  /* Docked (end) webcam size — clamp(min, vw, max) */
+  --webcam-offer-min: 150px;              /* min size (your value) */
+  --webcam-offer-vw: 36vw;                /* responsive portion (your value) */
+  --webcam-offer-max: 220px;              /* max size (your value) */
+
+  /* Mobile — NORMAL playback (pre-offer) */
+  --goend-gap-mobile: 40px;               /* gap between button and webcam */
+
+  /* Pre-offer webcam size — clamp(min, vw, max) */
+  --webcam-preoffer-min: 240px;           /* min size (your value) */
+  --webcam-preoffer-vw: 44vw;             /* responsive portion (your value) */
+  --webcam-preoffer-max: 260px;           /* max size (your value) */
+
+  /* Offer CTA block */
+  --endcta-margin-top: 10px;              /* top margin when placed in flow */
+  --endcta-max-w-px: 960px;               /* hard cap width */
+  --endcta-max-w-vw: 94vw;                /* viewport cap */
+
+  /* Optional: typography knobs (don’t change behavior by default) */
+  --font-intrigue: clamp(22px, 3.6vw, 25px);
+  --font-goend: 14px;
+  --font-progress-time: 11px;
+}
+
+
+/* Desktop defaults */
+:root {
+  /* ...your existing vars... */
+  --intrigue-gap-top: -200px;     /* distance from NAV → Intrigue */
+  --intrigue-gap-bottom: -200px;  /* distance from Intrigue → Player */
+}
+
+/* Mobile overrides (optional) */
+@media (max-width: 768px) {
+  :root {
+    --intrigue-gap-top: 0px;     /* NAV → Intrigue on mobile */
+    --intrigue-gap-bottom: 0px;  /* Intrigue → Player on mobile */
+  }
+}
+
+/* Keep typography easy to tune (optional) */
+.intrigue h3 { font-size: var(--font-intrigue); }
+.go-end-btn { font-size: var(--font-goend); }
+.progress__time { font-size: var(--font-progress-time); }
+
+/* ------------------------------
+   Mobile rules (<=768px) — EXACT behavior you liked
+   ------------------------------ */
+@media (max-width: 768px) {
+  /* ===== Offer mode (end screen) ===== */
+  /* Remove the big vertical gap by canceling vertical centering on the stage */
+  body.offer-mode .stage {
+    justify-content: flex-start !important; /* no large empty top */
+    align-items: center;
+    /* Keep just enough padding to clear the fixed navbar + timer pill */
+    padding-top: var(--offer-stage-top-padding-mobile); /* default 76px */
+    min-height: 100vh;
+  }
+
+  /* Show the top dock and add spacing both above (navbar) and below (offer) */
+  #topDock {
+    display: block;
+    width: 100%;
+    /* Gap between NAV/TIMER and webcam bubble */
+    margin: var(--topdock-margin-top) auto var(--topdock-margin-bottom); /* top / bottom gap */
+    padding: 0 var(--topdock-padding-x);
+  }
+
+  /* Webcam bubble when docked at the very top during the OFFER */
+  body.offer-mode #topDock .webcam-wrap {
+    position: static !important;
+    right: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    z-index: 1 !important; /* always under the fixed navbar */
+    width: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
+    height: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
+    margin: 0 auto; /* centered in the dock */
+  }
+
+  /* Ensure the offer block is part of the flow (no overlay → no “push-down” weirdness) */
+  body.offer-mode .player.content-hidden .end-cta {
+    position: static !important;
+    inset: auto !important;
+    display: grid;
+    place-items: center;
+    margin: var(--endcta-margin-top) auto 0;
+    width: 100%;
+    max-width: min(var(--endcta-max-w-px), var(--endcta-max-w-vw));
+  }
+
+  /* ===== Normal playback (no offer) ===== */
+  /* The Go-to-end strip becomes a vertical stack on mobile */
+  .go-end-wrap {
+    display: flex;
+    flex-direction: column; /* force rows, not side-by-side */
+    align-items: center;
+    gap: var(--goend-gap-mobile);
+  }
+
+  /* Webcam lives UNDER the Go-to-end button in playback */
+  .go-end-wrap .webcam-wrap {
+    position: static !important;
+    right: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    width: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
+    height: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
+    margin: 0 auto 0;
+  }
+}
+
+/* (Optional safety) tablets as well */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .go-end-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--goend-gap-mobile);
+  }
+}
+
+
+@media (max-width: 768px) {
+  /* Hide only the label text; keep red dot + countdown number */
+  .nav .timer > span:not(.dot-red) { display: none; }
+
+  /* Slightly tighten the pill so it fits better */
+  .nav .timer {
+    padding: 6px 10px;
+    gap: 8px;
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 768px) {
+  /* Soften and de-saturate the background blobs */
+  .blob {
+    opacity: .70;                 /* less ink */
+    filter: blur(90px) saturate(.85); /* softer, less saturated */
+  }
+  /* Remove the third blob to reduce color stacking on phones */
+  .b3 { display: none; }
+
+  /* Optionally shrink the two large blobs slightly */
+  .b1 { width: 560px; height: 560px; left: -150px; top: -120px; }
+  .b2 { width: 640px; height: 640px; right: -200px; bottom: -140px; }
+}
+
+
+/* ================= Mobile tunables ================= */
+:root {
+  /* Distance between seek-locked message and the bar */
+  --seekinsight-gap: 8px;
+
+  /* Force it on top; increase if your navbar uses a higher stacking context */
+  --seekinsight-z: 1000000000000000000;
+
+  /* Full control over message width */
+  --seekinsight-min: max-content;                 /* e.g. 220px */
+  --seekinsight-width: max-content;               /* e.g. 320px or 92vw */
+  --seekinsight-max: 100%;     /* cap on small screens */
+
+  /* Distance between floating time label and the bar */
+  --seeklabel-gap: 8px;
+
+  /* NEW: distance between the (mobile-docked) webcam and the progress/timeline below it */
+  --webcam-timeline-gap: 100px;
+
+  /* NEW: enlarge invisible hit area above/below the timeline without layout shifts */
+  --timeline-hitbox-pad: 10px; /* increase if you want it easier to grab on touch */
+}
+
+/* When the webcam is docked below the player on small screens, create space before the timeline */
+@media (max-width: 768px) {
+  /* (legacy safety) keep webcamWrap clean; spacing is on the wrapper below */
+  body[data-webcam-position="below"] #webcamWrap {
+    margin-bottom: 0; /* avoid fighting the new margin-top we control */
+  }
+
+  /* NEW: precise control of the space between the PLAYER (timeline) and the block holding webcam/button */
+  body:not(.offer-mode)[data-webcam-position="below"] .go-end-wrap {
+    margin-top: var(--webcam-timeline-gap); /* tweak this in :root to change the distance */
+  }
+}
+

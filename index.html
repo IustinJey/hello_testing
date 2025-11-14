@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Personal Video — Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;600;800;900&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Remix Icons (for tiny star etc.) -->
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+
+  <!-- Your styles: paste your current CSS into style.css -->
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="responsiveness.css">
+
+  <!-- Supabase client (v2) -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- ENV (fill these in prod or set via inline script before app.js) -->
+  <script>
+    // You can also set these via localStorage keys: hello:url and hello:key
+    window.ENV = {
+      SUPABASE_URL: "https://memoisahpwubckjwruzb.supabase.co",       // e.g. "https://xxxxx.supabase.co"
+      SUPABASE_ANON: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1lbW9pc2FocHd1YmNrandydXpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwODM5MjMsImV4cCI6MjA3NTY1OTkyM30.uhcwiQ2H027EOH-IJsDw6BhcO9ZhryQCpnPBTlUwZrk",      // e.g. "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      INSTANCE_ID: "default"  // your workspace/tenant id
+    };
+    // Slug parser: supports index.html?[alias] or index.html?slug=[alias]
+    (function () {
+      const q = location.search.replace(/^\?/, "");
+      const params = new URLSearchParams(location.search);
+      const alias = params.get("slug") || (q && !q.includes("=") ? q : "");
+      window.INIT = { slug: alias || "" };
+    })();
+  </script>
+</head>
+
+<body>
+  <!-- Blobs -->
+  <div class="blob b1"></div>
+  <div class="blob b2"></div>
+  <div class="blob b3"></div>
+
+  <!-- Navbar -->
+  <nav class="nav" id="nav">
+    <div class="inner">
+      <div class="logo"><img src="logo.png" alt="Logo"></div>
+      <div class="timer" id="navTimer">
+        <span class="dot-red"></span>
+        <span>Link expires in</span>
+        <strong id="navCountdown">7d 00:00:00</strong>
+      </div>
+      <!-- subtle music toggle -->
+      <div class="music-toggle off" id="musicToggle" title="Background music">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M9 18V6l10-2v12"></path>
+          <circle cx="6" cy="18" r="3"></circle>
+          <circle cx="18" cy="16" r="3"></circle>
+        </svg>
+        <span>Music</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Scene 1 -->
+  <section class="scene hidden" id="scene-hello">
+    <div class="stack">
+      <h1 class="big fade-in" id="headline">
+        Hey <span id="name" class="ink ink--hot">John</span>
+        <img id="waveGif" class="wavegif" src="wave.gif" alt="wave">
+      </h1>
+      <img id="fingerGif" class="fingerprint fade-soft" src="fingerprint.gif" alt="loading fingerprint" aria-hidden="true">
+    </div>
+  </section>
+
+  <!-- Scene 2 -->
+  <section class="scene hidden" id="scene-recorded">
+    <div class="stack">
+      <h2 class="subbig fade-in">I recorded this<br><span class="ink ink--hot">especially</span> for you.</h2>
+      <div class="note"><strong>Be careful</strong>, it’s available just for</div>
+      <div class="exclusive-badge">
+        <div class="dot"></div>
+        <div id="separateCountdown">7d 00:00:00</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Scene 3 -->
+  <section class="scene hidden" id="scene-goal">
+    <div class="stack">
+      <h2 class="subbig fade-in">
+        A lil' <span class="ink ink--hot">secret</span> for <span id="bizName">Acme Creative</span>.
+      </h2>
+      <div id="ctaSlide" class="cta-note">Let’s get started</div>
+    </div>
+  </section>
+
+  <!-- Video Stage -->
+  <section class="stage" id="stage">
+    <!-- Intrigue headline (between navbar & player) -->
+    <div class="intrigue" id="intrigue">
+      <h3>What I’m about to show you is the 20% that unlocks the other 80%.</h3>
+    </div>
+
+    <div class="player" id="player">
+      <div class="frame" id="frame">
+        <video id="mainVideo" playsinline muted autoplay preload="metadata">
+          <source src="presentation.mp4" type="video/mp4">
+        </video>
+
+        <!-- Minimal main-video UI -->
+        <div class="main-video-ui" id="mainVideoUI">
+          <button class="main-play" id="mainPlayBtn" aria-label="Play">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+              <polygon points="8,5 19,12 8,19"></polygon>
+            </svg>
+          </button>
+          <div class="main-pause-hint" id="mainPauseHint" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <rect x="7" y="5" width="4" height="14"></rect>
+              <rect x="13" y="5" width="4" height="14"></rect>
+            </svg>
+          </div>
+        </div>
+
+        <!-- First-time unmute overlay -->
+        <div class="hint" id="hintOverlay" role="button" aria-label="Unmute and play">
+          <button class="btn" id="hintBtn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+              <path d="M19 5c1.5 1.5 2.5 3.5 2.5 7s-1 5.5-2.5 7"></path>
+            </svg>
+            Tap to play &amp; unmute
+          </button>
+          <div style="font-weight:700;color:#4b5563">For the full experience</div>
+        </div>
+      </div>
+
+      <!-- Webcam: wrapper + bubble + overlay -->
+      <div class="webcam-wrap" id="webcamWrap">
+        <div class="webcam appear" id="webcam">
+          <div class="cam-mask">
+            <video id="webcamVideo" src="cam.mp4" autoplay muted loop playsinline></video>
+            <video id="webcamVideo2" src="cam_end.mp4" preload="metadata" playsinline></video>
+          </div>
+
+          <div class="webcam-play" id="webcamPlayUI">
+            <button class="btn" id="webcamPlayBtn" aria-label="Play webcam clip">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                <polygon points="8,5 19,12 8,19"></polygon>
+              </svg>
+            </button>
+          </div>
+
+          <div class="webcam-pause-hint" id="webcamPauseHint" aria-hidden="true">
+            <div class="btn">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <rect x="7" y="5" width="4" height="14"></rect>
+                <rect x="13" y="5" width="4" height="14"></rect>
+              </svg>
+            </div>
+          </div>
+
+          <button class="orbit-reload" id="orbitReplay" aria-label="Replay presentation">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+              <polyline points="3 4 3 10 9 10"></polyline>
+            </svg>
+          </button>
+
+          <div class="cam-overlay hidden" id="camOverlay" aria-hidden="true"></div>
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div class="progress disabled" id="progress">
+        <div class="progress__bar" id="progressBar"></div>
+        <div class="progress__time" id="timeLeft">0:00</div>
+        <!-- Minimal golden insight -->
+        <div class="seek-insight" id="seekInsight">
+          <i class="ri-star-fill star"></i>
+          <span>Stay with me—the reveal in a moment is the unlock</span>
+        </div>
+      </div>
+
+      <!-- ====== CTA BLOCK ====== -->
+      <div class="end-cta hidden" id="endCta" aria-hidden="true">
+        <div class="end-cta__stack">
+          <div class="cta-deadline">
+            <div class="cta-deadline__label">Link expires in</div>
+            <div class="cta-deadline__time" id="ctaCountdown">7d 00:00:00</div>
+            <h3 class="cta-headline" id="ctaHeadline">
+              What if 30 days from now your best customers are finding you first?
+            </h3>
+          </div>
+
+          <div class="button-wrapper2">
+            <button class="gold-button2" onclick="apxOpen()">
+              <div style="display:inline-flex;align-items:center;gap:10px">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M3 7l4 3 5-6 5 6 4-3v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path>
+                </svg>
+                <span>Claim your free 30-minute strategy session</span>
+              </div>
+              <span class="gold-sub">Be quick! Free spots are almost gone for <span id="ctaMonth">September</span></span>
+            </button>
+            <span class="shine-png" aria-hidden="true"></span>
+          </div>
+
+          <div class="cta-or" aria-hidden="true"><span>or</span></div>
+
+          <div class="cta-pair">
+            <button class="cta-alt cta-alt--left cta-alt--filled" id="ctaVideoReply" title="Record a quick reply" onclick="apxRecorderOpen()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M17 10.5V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3.5l4 3v-9l-4 3z"></path>
+              </svg>
+              <span>Record a quick reply</span>
+            </button>
+            <button class="cta-alt cta-alt--right cta-alt--ghost" id="ctaWhatsApp" title="Ask on WhatsApp">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M20 3.5A10 10 0 0 0 3.3 16.8L2 22l5.3-1.4A10 10 0 1 0 20 3.5zm-8 17a8.2 8.2 0 0 1-4.2-1.2l-.3-.2-2.5.7.7-2.4-.2-.3A8.2 8.2 0 1 1 12 20.5zm4.6-6.3c-.3-.2-1.7-.8-1.9-.9s-.5-.2-.7.2c-.2.3-.8.9-.9 1-.2.1-.3.2-.6.1s-1.2-.4-2.3-1.4c-.9-.8-1.4-1.8-1.5-2.1-.1-.2 0-.4.1-.6l.4-.5c.1-.2.1-.3.2-.5s0-.4 0-.5c0-.2-.7-1.7-1-2.3-.3-.5-.5-.4-.7-.4h-.6c-.2 0-.5.1-.8.4-.3.3-1 1-1 2.4s1.1 2.8 1.3 3c.2.2 2.2 3.4 5.3 4.7.7.3 1.2.5 1.6.6.7-.2 1.3-.2 1.8-.1.6-.1 1.7-.7 1.9-1.4.2-.7.2-1.3.1-1.4 0-.1-.2-.2-.4-.3z"></path>
+              </svg>
+              <span>Ask on WhatsApp</span>
+            </button>
+          </div>
+
+          <p class="cta-riskline">No contracts. If this isn’t helpful, I’ll donate <strong>$25</strong> to a local organization in your name.</p>
+        </div>
+      </div>
+      <!-- ====== END CTA BLOCK ====== -->
+    </div>
+  </section>
+
+  <!-- Bottom brand carousel -->
+  <div class="brand-marquee" id="brandMarquee" aria-hidden="true">
+    <div class="brand-marquee__inner">
+      <span class="brand-title">Trusted by teams like</span>
+      <div class="marquee">
+        <div class="track" id="brandTrack">
+          <img src="logos/brand1.png" alt="Brand 1">
+          <img src="logos/brand2.png" alt="Brand 2">
+          <img src="logos/brand3.png" alt="Brand 3">
+          <img src="logos/brand4.png" alt="Brand 4">
+          <img src="logos/brand5.png" alt="Brand 5">
+          <!-- JS clones to ensure seamless wrap -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skip intro button -->
+  <button class="skip-intro" id="skipIntroBtn">Skip intro</button>
+
+  <!-- ===== PIN OVERLAY (type to enter) ===== -->
+  <div class="pin-overlay" id="pinOverlay">
+    <div class="pin-stack">
+      <div class="pin-title">Enter Access PIN</div>
+      <div class="pin-sub">Use the 4-digit PIN included with your link</div>
+      <div class="pin-boxes" id="pinBoxes" aria-label="PIN input" role="group">
+        <div class="pin-digit"></div>
+        <div class="pin-digit"></div>
+        <div class="pin-digit"></div>
+        <div class="pin-digit"></div>
+      </div>
+      <div class="pin-error" id="pinError">PIN incorrect</div>
+    </div>
+  </div>
+
+  <!-- Audio elements (SFX + background music) -->
+  <audio id="sfxPin" preload="auto" src="pin.mp3"></audio>
+  <audio id="sfxHello" preload="auto" src="hello.mp3"></audio>
+  <audio id="sfxOffer" preload="auto" src="offer.mp3"></audio>
+  <audio id="bgMusic" preload="auto" src="music.mp3" loop></audio>
+   <audio id="endMusic" src="endmusic.mp3" preload="auto"></audio>
+  <!-- App scripts (dynamic hydration happens in app.js) -->
+  <script defer src="./app.js"></script>
+  <script src="./picker/appointment-modal.js"></script>
+  <script src="./record/recorder-modal.js"></script>
+</body>
+</html>

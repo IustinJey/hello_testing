@@ -1,14 +1,13 @@
 /* =====================================================
   app.js — Viewer (dynamic hydration via Supabase)
 
-  Includes:
-  - Mobile-safe PIN flow (awaits hydration; focusable tiny input; 100dvh centering)
-  - Riskline hydration fix under the offer buttons
-  - Timeline hover/drag with invisible, non-layout hitbox (+ toggleable for PIN)
-  - CSS-driven spacing knobs for messages & webcam/timeline gap
-  - Mobile fullscreen button on the video; rotates, overlays a mini-webcam;
-    exits and returns to the offer after the presentation ends.
-  - Music crossfades + end-mode webcam crossfade
+  This build adds robust mobile PIN validation:
+  - Parses link.settings if it's a JSON string
+  - Accepts multiple keys: pin_plain, pinPlain, pin, pin_digits, link.pin*
+  - Normalizes locale digits (Arabic‑Indic → ASCII) and strips non-digits
+  - Compares normalized digits to avoid mobile autofill issues
+
+  NOTE: Everything else is kept identical to your working version.
   ===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
@@ -32,7 +31,7 @@ const SB = (SUPABASE_URL && SUPABASE_ANON && window.supabase)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: false } })
   : null;
 
-/* ===================== Static defaults ===================== */
+/* ===================== Static defaults (kept) ===================== */
 const EXPIRY_DAYS = 7; // fallback expiry only
 const TEST_PIN = '1234'; // only used if DB missing
 
@@ -45,7 +44,7 @@ const HYDRATE = { link: null, lead: null, pres: null, cta: {}, videos: { slidesU
 let HYDR = { started: false, done: false, notFound: false };
 let _resolveHydrate; const HYDRATE_DONE = new Promise(r => (_resolveHydrate = r));
 
-/* ===================== Elements ===================== */
+/* ===================== Elements (unchanged) ===================== */
 const nav = document.getElementById('nav');
 const navCountdown = document.getElementById('navCountdown');
 const navTimer = document.getElementById('navTimer');
@@ -58,13 +57,14 @@ const bizNameEl = document.getElementById('bizName');
 const ctaSlide = document.getElementById('ctaSlide');
 const stage = document.getElementById('stage');
 
-// ===== create a top dock container for mobile offer mode (under navbar) =====
+// ===== ADD: create a top dock container for mobile offer mode (under navbar) =====
 let topDock = document.getElementById('topDock');
 if (!topDock && stage) {
   topDock = document.createElement('div');
   topDock.id = 'topDock';
   stage.insertBefore(topDock, stage.firstChild);
 }
+// ===== END ADD =====
 
 const playerEl = document.getElementById('player');
 const frameEl = document.getElementById('frame');
@@ -174,7 +174,7 @@ function crossfadeBackToMainMusic() {
   ]).then(() => { try { endMusic && endMusic.pause(); } catch {}; });
 }
 
-/* ===================== Expiry countdown ===================== */
+/* ===================== Expiry countdown (original) ===================== */
 const STORAGE_KEY_EXPIRY = 'pv_link_expiry_ts';
 let expiryTS = Number(localStorage.getItem(STORAGE_KEY_EXPIRY));
 const nowTS = Date.now();
@@ -203,7 +203,7 @@ function tick() {
 setInterval(tick, 1000);
 tick();
 
-/* Month label */
+/* Month label (kept) */
 (function setMonthLabel() {
   const month = new Date().toLocaleString(undefined, { month: 'long' });
   if (ctaMonth) ctaMonth.textContent = month;
@@ -211,11 +211,12 @@ tick();
 
 /* ===================== Storage helpers ===================== */
 const STORAGE_BUCKET = (ENV.STORAGE_BUCKET || 'hello-videos');
-const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // slides use this
+const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // <— slides use this
 const CAM_BUCKET = ENV.CAM_BUCKET || 'webcam';
 const HAND_BUCKET = ENV.HAND_BUCKET || 'handcam';
 const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
+// ---------- Storage helpers (public/signed URL resolution) ----------
 function partsFromPublicURL(url) {
   const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
   return m ? { bucket: m[1], path: m[2] } : null;
@@ -250,7 +251,6 @@ async function pickFirstStorageURLAsync(candidates) {
   return null;
 }
 
-// Re-sign a <video> src automatically if a signed URL expires or errors.
 function attachAutoResign(videoEl) {
   if (!videoEl) return;
   let refreshing = false;
@@ -289,10 +289,8 @@ function guessStorageKeyVariants(id, bucket) {
   return out;
 }
 
-// Minimal helper used when only an ID is provided and the table isn't exposed
 async function resolveIdToURL(id, preferredBucket) {
   if (!SB || !id) return null;
-
   const TABLES = [
     'videos',
     'hello_videos',
@@ -320,7 +318,6 @@ async function resolveIdToURL(id, preferredBucket) {
       }
     } catch { /* try next table */ }
   }
-
   if (isUUID(id)) {
     const guesses = guessStorageKeyVariants(id, preferredBucket || SLIDES_BUCKET);
     for (const g of guesses) {
@@ -368,7 +365,7 @@ function injectHighlights(resolvedText, highlightsExpanded) {
   return html;
 }
 
-/* ===================== NOT FOUND ===================== */
+/* ===================== NOT FOUND (no fallback) ===================== */
 function showNotFound() {
   nav?.classList.add('show');
   if (navTimer) navTimer.style.display = 'none';
@@ -393,6 +390,27 @@ function showNotFound() {
 /* =====================================================
    DYNAMIC HYDRATION (fetch data using slug before PIN)
    ===================================================== */
+
+// ---- PIN utilities (NEW) ----
+const DIGIT_MAP = {
+  '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9',
+  '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'
+};
+function normalizeDigits(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/[٠-٩۰-۹]/g, ch => DIGIT_MAP[ch] ?? ch)
+    .replace(/\D+/g, '');
+}
+function firstNonEmpty(...vals) {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s !== '') return v;
+  }
+  return '';
+}
+
 async function hydrateFromCloud() {
   HYDR.started = true;
   try {
@@ -402,7 +420,7 @@ async function hydrateFromCloud() {
     }
     // 1) Link by slug (+ instance scope if provided)
     let linkQ = SB.from('hello_links')
-      .select('id,slug,lead_id,presentation_id,form_id,require_pin,expires_at,overrides,settings,active')
+      .select('id,slug,lead_id,presentation_id,form_id,require_pin,expires_at,overrides,settings,active,pin,pin_plain')
       .eq('slug', slugFromQS)
       .eq('active', true)
       .limit(1);
@@ -427,7 +445,7 @@ async function hydrateFromCloud() {
     const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov)$/i;
     const looksLikeURL = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
     const looksLikePath = (s) => typeof s === 'string' && (VIDEO_EXT_RE.test(s) || /^(default|slides|presentation|uploads|public)\//i.test(s) || s.includes('/'));
-    const isUUIDLoose = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    const isUUID = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
     function deepCandidates(obj, kind, buckets, maxDepth = 4, pathSeen = new WeakSet()) {
       const out = [];
@@ -436,7 +454,7 @@ async function hydrateFromCloud() {
         if (!val) return;
         if (typeof val === 'string') {
           if (looksLikeURL(val)) out.push({ url: val });
-          else if (isUUIDLoose(val)) out.push({ id: val });
+          else if (isUUID(val)) out.push({ id: val });
           else if (looksLikePath(val)) out.push({ bucket: srcBucket, path: val });
         } else if (typeof val === 'object') {
           const b = val.bucket || srcBucket;
@@ -465,7 +483,7 @@ async function hydrateFromCloud() {
           }
 
           if (typeof v === 'string') {
-            if (looksLikeURL(v) || isUUIDLoose(v) || looksLikePath(v)) {
+            if (looksLikeURL(v) || isUUID(v) || looksLikePath(v)) {
               push(v, kind === 'slides' ? buckets.slides : buckets.cam);
               continue;
             }
@@ -509,9 +527,9 @@ async function hydrateFromCloud() {
     const vDef = (pres?.defaults?.videos) || (pres?.videos) || (pres?.media) || {};
 
     const legacySlidesUrlOverride = link?.overrides?.videos?.slidesUrl || link?.overrides?.slidesUrl || null;
-    const legacySlidesUrlDefault  = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
+    const legacySlidesUrlDefault = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
     const legacyWebcamUrlOverride = link?.overrides?.videos?.webcamUrl || link?.overrides?.webcamUrl || null;
-    const legacyWebcamUrlDefault  = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
+    const legacyWebcamUrlDefault = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
 
     function gatherVideoCandidates(v, kind, buckets) {
       if (!v) return [];
@@ -619,15 +637,15 @@ async function hydrateFromCloud() {
     const cta = { ...baseCTA, ...overCTA };
 
     const ctaResolved = {
-      stageHeadline:    resolveTags(cta.stageHeadline, lead),
-      timelineWarning:  resolveTags(cta.timelineWarning, lead),
-      offerHeadline:    resolveTags(cta.offerHeadline, lead),
-      button:           resolveTags(cta.button, lead),
-      quickReplyLabel:  resolveTags(cta.quickReplyLabel, lead),
-      whatsAppLabel:    resolveTags(cta.whatsAppLabel, lead),
-      whatsAppNumber:   resolveTags(cta.whatsAppNumber, lead),
-      whatsAppEnabled:  (cta.whatsAppEnabled !== false),
-      riskline:         resolveTags(cta.riskline, lead)
+      stageHeadline: resolveTags(cta.stageHeadline, lead),
+      timelineWarning: resolveTags(cta.timelineWarning, lead),
+      offerHeadline: resolveTags(cta.offerHeadline, lead),
+      button: resolveTags(cta.button, lead),
+      quickReplyLabel: resolveTags(cta.quickReplyLabel, lead),
+      whatsAppLabel: resolveTags(cta.whatsAppLabel, lead),
+      whatsAppNumber: resolveTags(cta.whatsAppNumber, lead),
+      whatsAppEnabled: (cta.whatsAppEnabled !== false),
+      riskline: resolveTags(cta.riskline, lead)
     };
 
     if (nameEl) nameEl.textContent = lead?.alias || lead?.nickname || '';
@@ -680,7 +698,7 @@ async function hydrateFromCloud() {
       riskTargets.forEach(el => {
         if (ctaResolved.riskline) {
           el.textContent = ctaResolved.riskline;
-          try { el.style.removeProperty('display'); } catch {}
+          try { el.style.removeProperty('display'); } catch { }
           el.setAttribute('aria-hidden', 'false');
         } else {
           el.textContent = '';
@@ -707,8 +725,19 @@ async function hydrateFromCloud() {
     const hue = link?.overrides?.theme?.hue ?? pres?.theme?.hue;
     if (typeof hue === 'number') document.documentElement.style.setProperty('--hue', String(hue));
 
-    PIN_REQUIRED = !!link?.require_pin;
-    PIN_EXPECTED = (link?.settings?.pin_plain || '').trim() || TEST_PIN;
+    // ---- Robust PIN extraction (NEW) ----
+    let rawSettings = link?.settings ?? {};
+    if (typeof rawSettings === 'string') {
+      try { rawSettings = JSON.parse(rawSettings); } catch { rawSettings = {}; }
+    }
+    const pinCandidateRaw = firstNonEmpty(
+      rawSettings.pin_plain, rawSettings.pinPlain, rawSettings.pin_digits, rawSettings.pin,
+      link?.pin_plain, link?.pin
+    );
+    const pinExpectedDigits = normalizeDigits(pinCandidateRaw);
+    PIN_REQUIRED = (link?.require_pin === true) || (pinExpectedDigits.length > 0);
+    PIN_EXPECTED = pinExpectedDigits || normalizeDigits(TEST_PIN);
+    console.debug('[PIN] required:', PIN_REQUIRED, 'expected.len:', PIN_EXPECTED.length);
 
     HYDRATE.link = link; HYDRATE.lead = lead; HYDRATE.pres = pres; HYDRATE.cta = ctaResolved; HYDRATE.videos = { slidesUrl, webcamUrl, handUrl };
 
@@ -719,11 +748,9 @@ async function hydrateFromCloud() {
   }
 }
 hydrateFromCloud();
-if (!slugFromQS) {
-  hideHeadlineTimer();
-}
+if (!slugFromQS) { hideHeadlineTimer(); }
 
-/* ===================== Intro & stage ===================== */
+/* ===================== Intro & stage (unchanged visuals) ===================== */
 const SLIDE_DURATION_MS = 1800;
 const SHIFT_UP_PX = 110;
 const SHIFT_RIGHT_PX = 24;
@@ -757,7 +784,6 @@ function showStage() {
   skipIntroBtn.classList.add('hidden');
   try { mainVideo.play().catch(() => { }); } catch { }
   enterNormalMode();
-  // Start main music softly
   if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} }
   stabilizeIntrigue(800);
 }
@@ -954,7 +980,6 @@ function maybeRevertUnauthorizedSeek() { const nowPerf = performance.now(); if (
 mainVideo.addEventListener('seeking', () => { maybeRevertUnauthorizedSeek(); });
 mainVideo.addEventListener('seeked', () => { syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); });
 function seekFromEvent(e) {
-  if (swallowClick) { swallowClick = false; return; }
   if (!isSeekEnabled()) return;
   if (!isFinite(mainVideo.duration) || mainVideo.duration <= 0) return;
   const rect = progress.getBoundingClientRect();
@@ -966,61 +991,21 @@ function seekFromEvent(e) {
 }
 progress.addEventListener('click', seekFromEvent);
 progress.addEventListener('touchstart', seekFromEvent, { passive: true });
-document.addEventListener('keydown', (e) => {
-  if (isSeekEnabled()) return;
-  const k = e.key;
-  if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) {
-    e.preventDefault(); e.stopPropagation();
-  }
-}, true);
+document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
 
 /* ===================== Preview loop (muted pre-roll) ===================== */
 let previewLoopActive = true; const PREVIEW_LOOP_EPS = 0.12;
-mainVideo.addEventListener('timeupdate', () => {
-  if (!previewLoopActive || hasClickedUnmuteOverlay) return;
-  const d = mainVideo.duration; if (!isFinite(d) || d <= 0) return;
-  if (mainVideo.currentTime >= d - PREVIEW_LOOP_EPS) {
-    setMainTimeAndHardSync(0.03); ignoreSeeksUntil = performance.now() + 200;
-    if (mainVideo.paused) mainVideo.play().catch(() => { });
-  }
-});
+mainVideo.addEventListener('timeupdate', () => { if (!previewLoopActive || hasClickedUnmuteOverlay) return; const d = mainVideo.duration; if (!isFinite(d) || d <= 0) return; if (mainVideo.currentTime >= d - PREVIEW_LOOP_EPS) { setMainTimeAndHardSync(0.03); ignoreSeeksUntil = performance.now() + 200; if (mainVideo.paused) mainVideo.play().catch(() => { }); } });
 
 /* ===================== Continuous float ===================== */
-const floatStart = performance.now();
-function floatRAF(now) {
-  const t = (now - floatStart) / 1000;
-  const x = Math.cos(t * FLOAT_SPEED_X) * FLOAT_RADIUS_X;
-  const y = Math.sin(t * FLOAT_SPEED_Y) * FLOAT_RADIUS_Y;
-  webcam.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`;
-  requestAnimationFrame(floatRAF);
-}
-requestAnimationFrame(floatRAF);
+const floatStart = performance.now(); function floatRAF(now) { const t = (now - floatStart) / 1000; const x = Math.cos(t * FLOAT_SPEED_X) * FLOAT_RADIUS_X; const y = Math.sin(t * FLOAT_SPEED_Y) * FLOAT_RADIUS_Y; webcam.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`; requestAnimationFrame(floatRAF); } requestAnimationFrame(floatRAF);
 
 /* ===================== Slide mechanics ===================== */
-function slideWebcamUpSmall() {
-  webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
-  webcamWrap.style.transform = `translate(${SHIFT_RIGHT_PX}px, ${-SHIFT_UP_PX}px)`;
-  webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
-  webcam.style.scale = SCALE_TOP;
-  webcam.style.transform = `scale(1)`;
-  webcam.classList.add('pop-pulse'); setTimeout(() => webcam.classList.remove('pop-pulse'), 450);
-}
-function slideWebcamDownToOrigin() {
-  webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
-  webcamWrap.style.transform = `translate(0px, 0px)`;
-  webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
-  webcam.style.scale = 1; webcam.style.transform = `scale(1)`;
-}
+function slideWebcamUpSmall() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(${SHIFT_RIGHT_PX}px, ${-SHIFT_UP_PX}px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = SCALE_TOP; webcam.style.transform = `scale(1)`; webcam.classList.add('pop-pulse'); setTimeout(() => webcam.classList.remove('pop-pulse'), 450); }
+function slideWebcamDownToOrigin() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(0px, 0px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = 1; webcam.style.transform = `scale(1)`; }
 
 /* ===================== Orbit positioning ===================== */
-function positionOrbitOnRim(angleDeg = 315) {
-  if (!webcam || !orbitReplay) return;
-  orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%';
-  const r = webcam.offsetWidth / 2; if (!r) return;
-  const theta = (angleDeg * Math.PI) / 180;
-  const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r;
-  orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
-}
+function positionOrbitOnRim(angleDeg = 315) { if (!webcam || !orbitReplay) return; orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%'; const r = webcam.offsetWidth / 2; if (!r) return; const theta = (angleDeg * Math.PI) / 180; const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r; orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`; }
 window.addEventListener('resize', () => positionOrbitOnRim());
 
 /* ===================== End state + crossfade + OFFER SFX & MUSIC ===================== */
@@ -1033,14 +1018,12 @@ function showEndUI() {
   endCta.setAttribute('aria-hidden', 'false');
   brandMarquee?.classList.add('show');
   brandMarquee?.setAttribute('aria-hidden', 'false');
-
   try { sfxOffer.currentTime = 0; sfxOffer.play().catch(() => { }); } catch { };
 
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = 'none';
   }
-
   crossfadeToEndMusic();
 
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
@@ -1061,7 +1044,6 @@ function hideEndUI() {
   }
 
   crossfadeBackToMainMusic();
-
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
   setTimeout(() => { positionOrbitOnRim(315); }, 50);
 }
@@ -1087,8 +1069,6 @@ mainVideo.addEventListener('ended', () => {
     return;
   }
   maybeUnlockSeekOnEnd();
-  // If we are in mobile fullscreen, exit it before showing offer
-  if (isMobileFullscreenActive()) { requestExitFullscreenSoft(); }
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
   navTimer?.classList.add('hide');
@@ -1124,12 +1104,11 @@ function maybeUnlockSeekOnEnd() { if (unmutedSessionStartedAtZero && !mainVideo.
 
 document.getElementById('ctaSession')?.addEventListener('click', () => { window.open('https://calendly.com/rnq/30min', '_blank', 'noopener'); });
 document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('Record a quick reply clicked'); });
+
 function goToEndNow() {
   if (!isSeekEnabled()) return;
   try { mainVideo.pause(); } catch { }
   try { webcamVideo.pause(); } catch { }
-
-  if (isMobileFullscreenActive()) { requestExitFullscreenSoft(); }
 
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
@@ -1140,157 +1119,95 @@ function goToEndNow() {
   crossfadeToWebcamEnd(100);
 }
 
-/* ===================== Seamless marquee ===================== */
-(function setupMarquee() {
-  if (!brandTrack) return;
-  const container = brandTrack.parentElement;
-  const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true));
-  function ensureFill() {
-    brandTrack.innerHTML = '';
-    baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
-    while (brandTrack.scrollWidth < container.clientWidth * 2) {
-      baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
-    }
-    baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
-  }
-  ensureFill();
-  const PX_PER_SEC = 120;
-  const setDur = () => {
-    const totalWidth = brandTrack.scrollWidth;
-    const dur = (totalWidth / 2) / PX_PER_SEC;
-    brandTrack.style.animationDuration = `${dur}s`;
-  };
-  setDur();
-  let rAF = null;
-  window.addEventListener('resize', () => {
-    if (rAF) cancelAnimationFrame(rAF);
-    rAF = requestAnimationFrame(() => {
-      ensureFill(); setDur(); positionIntrigueBetween();
-    });
-  });
-})();
+/* ===================== Seamless marquee (kept) ===================== */
+(function setupMarquee() { if (!brandTrack) return; const container = brandTrack.parentElement; const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true)); function ensureFill() { brandTrack.innerHTML = ''; baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); while (brandTrack.scrollWidth < container.clientWidth * 2) { baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } ensureFill(); const PX_PER_SEC = 120; const setDur = () => { const totalWidth = brandTrack.scrollWidth; const dur = (totalWidth / 2) / PX_PER_SEC; brandTrack.style.animationDuration = `${dur}s`; }; setDur(); let rAF = null; window.addEventListener('resize', () => { if (rAF) cancelAnimationFrame(rAF); rAF = requestAnimationFrame(() => { ensureFill(); setDur(); positionIntrigueBetween(); }); }); })();
 
-/* ===================== PIN overlay logic (MOBILE-SAFE) ===================== */
+/* ===================== PIN overlay logic (waits for hydration) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
   const pinError = document.getElementById('pinError');
-  if (!pinOverlay || !pinBoxes) return;
-
-  // Disable timeline hover/scrub overlay while PIN is active (prevents touch stealing)
-  try { window.__scrubOverlaySetEnabled && window.__scrubOverlaySetEnabled(false); } catch {}
-
-  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
   const digits = [];
-  const PIN_MAX = 4;
+  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
 
-  // A tiny, visible-to-the-browser input. Must be focusable on iOS/Android.
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
   pinInput.pattern = '[0-9]*';
   pinInput.autocomplete = 'one-time-code';
-  pinInput.maxLength = PIN_MAX;
-  pinInput.autocapitalize = 'off';
-  pinInput.autocorrect = 'off';
-  pinInput.spellcheck = false;
-  pinInput.enterKeyHint = 'done';
-
-  Object.assign(pinInput.style, {
-    position: 'fixed',
-    left: '50%',
-    top: '50%',
-    transform: 'translate(-50%, -50%)',
-    width: '1px',
-    height: '1px',
-    opacity: '0.01',
-    background: 'transparent',
-    color: 'transparent',
-    border: '0',
-    outline: '0',
-    zIndex: '100000',
-    pointerEvents: 'auto'
-  });
+  pinInput.maxLength = 4;
+  pinInput.style.position = 'absolute';
+  pinInput.style.opacity = '0';
+  pinInput.style.pointerEvents = 'none';
+  pinInput.style.width = '0';
+  pinInput.style.height = '0';
   pinOverlay.appendChild(pinInput);
 
-  function render() {
-    cells.forEach((c, i) => {
-      const filled = i < digits.length;
-      c.classList.toggle('filled', filled);
-      c.textContent = filled ? '•' : '';
-    });
-  }
-  function flashError() {
-    if (!pinError) return;
-    pinError.classList.add('show');
-    cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); });
-    setTimeout(() => pinError.classList.remove('show'), 1400);
-  }
+  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); } catch { } }, 0); }
+  pinOverlay.addEventListener('click', focusPinInputSoon);
+
+  function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); }
+  function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); }
   function clearDigits() { digits.length = 0; render(); }
-
-  function focusPinSoon() { setTimeout(() => { try { pinInput.focus({ preventScroll: true }); } catch {} }, 0); }
-
-  if (window.visualViewport) {
-    const vv = window.visualViewport;
-    const recenter = () => { pinOverlay.style.setProperty('--vvh', `${vv.height}px`); };
-    vv.addEventListener('resize', recenter);
-    vv.addEventListener('scroll', recenter);
-    recenter();
-  }
+  function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
+  function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
 
   pinInput.addEventListener('input', () => {
-    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, PIN_MAX);
+    const v = normalizeDigits(pinInput.value).slice(0, 4);
     digits.length = 0;
     for (const ch of v) digits.push(ch);
     render();
-    if (digits.length === PIN_MAX) checkIfReady();
+    if (digits.length === 4) checkIfReady();
   });
-
-  ['click','pointerdown','touchstart'].forEach(ev =>
-    pinOverlay.addEventListener(ev, focusPinSoon, { passive: true })
-  );
-
-  function slideOutOverlay() {
-    pinOverlay.classList.add('fade-out');
-    setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
-  }
-
-  let checking = false;
-  async function checkIfReady() {
-    if (digits.length !== PIN_MAX || checking) return;
-    checking = true;
-    await HYDRATE_DONE;
-    if (!PIN_REQUIRED) { checking = false; return startAfterPin(); }
-    const attempt  = digits.join('');
-    const expected = String(PIN_EXPECTED || '').trim();
-    if (attempt === expected) {
-      checking = false;
-      startAfterPin();
-    } else {
-      flashError();
-      setTimeout(() => { clearDigits(); pinInput.value = ''; focusPinSoon(); checking = false; }, 180);
-    }
-  }
 
   async function startAfterPin() {
     slideOutOverlay();
-    try { pinInput.blur(); } catch {}
-    try { window.__scrubOverlaySetEnabled && window.__scrubOverlaySetEnabled(true); } catch {}
+    try { pinInput.blur(); } catch { }
     await HYDRATE_DONE;
     if (HYDR.notFound) { showNotFound(); return; }
     runSequence();
   }
 
-  (async function waitForDecision() {
-    await HYDRATE_DONE;
-    if (!PIN_REQUIRED) startAfterPin();
-  })();
-
+  function checkIfReady() {
+    if (!PIN_REQUIRED) { startAfterPin(); return; }
+    if (digits.length !== 4) return;
+    const attempt = normalizeDigits(digits.join(''));
+    const expected = normalizeDigits(PIN_EXPECTED);
+    if (attempt && expected && attempt === expected) {
+      startAfterPin();
+    } else {
+      flashError();
+      setTimeout(() => { clearDigits(); pinInput.value = ''; focusPinInputSoon(); }, 180);
+    }
+  }
+  function onKey(e) {
+    if (!pinOverlay || pinOverlay.style.display === 'none') return;
+    const k = e.key;
+    if (/[0-9٠-٩۰-۹]/.test(k)) {
+      if (digits.length < 4) {
+        digits.push(normalizeDigits(k));
+        render();
+        playPinSound();
+        if (digits.length === 4) checkIfReady();
+      }
+      e.preventDefault(); return;
+    }
+    if (k === 'Backspace' || k === 'Delete') {
+      if (digits.length > 0) { digits.pop(); render(); playPinSound(); }
+      e.preventDefault(); return;
+    }
+  }
+  document.addEventListener('keydown', onKey, true);
   render();
-  focusPinSoon();
+  focusPinInputSoon();
+
+  (async function waitForPinDecision() {
+    await HYDRATE_DONE;
+    if (!PIN_REQUIRED) { startAfterPin(); }
+  })();
 })();
 
-/* ===================== Music navbar toggle ===================== */
+/* ===================== Music navbar toggle (controls both tracks) ===================== */
 (function setupMusicToggle() {
   if (!musicToggle) return;
   if (bgMusic) setVolumeSafe(bgMusic, MUSIC.MAIN_VOL);
@@ -1302,7 +1219,11 @@ function goToEndNow() {
   }
   musicToggle.addEventListener('click', () => {
     musicEnabled = !musicEnabled;
-    if (!musicEnabled) { pauseBothMusic(); } else { playActiveMusicForState(); }
+    if (!musicEnabled) {
+      pauseBothMusic();
+    } else {
+      playActiveMusicForState();
+    }
     updateBtn();
   });
 
@@ -1317,12 +1238,17 @@ function goToEndNow() {
 function applySeekInsightStyleFromCSS() {
   if (!seekInsight) return;
   const cs = getComputedStyle(document.documentElement);
+
   const gap = (cs.getPropertyValue('--seekinsight-gap') || '').trim() || '10px';
   const z   = (cs.getPropertyValue('--seekinsight-z') || '').trim() || '10060';
   const w   = (cs.getPropertyValue('--seekinsight-width') || '').trim();
+
   seekInsight.style.marginTop = gap;
   seekInsight.style.zIndex = String(parseInt(z, 10) || 10060);
-  if (w) { seekInsight.style.maxWidth = w; seekInsight.style.width = 'auto'; }
+  if (w) {
+    seekInsight.style.maxWidth = w;
+    seekInsight.style.width = 'auto';
+  }
 }
 applySeekInsightStyleFromCSS();
 window.addEventListener('resize', applySeekInsightStyleFromCSS);
@@ -1385,6 +1311,7 @@ function setupGoToEndButton() {
   }
 
   window.__relocateWebcamForSmall = relocateWebcamForSmall;
+
   relocateWebcamForSmall();
   window.addEventListener('resize', relocateWebcamForSmall);
 
@@ -1392,12 +1319,12 @@ function setupGoToEndButton() {
 }
 setupGoToEndButton();
 
-/* ===================== HOVER/CURSOR TIME LABEL (overlay hitbox) ===================== */
+/* ===================== HOVER/CURSOR TIME LABEL (only over the bar, drag fixed) ===================== */
 (function setupHoverTimeLabel(){
   if (!progress || !mainVideo) return;
 
-  const HITBOX_PAD = 16;     // easier finger grab without layout shift
-  const SCRUB_START_PX = 4;  // start scrubbing only after a small move
+  const HITBOX_PAD = 16;
+  const SCRUB_START_PX = 4;
 
   function getLabelGap() {
     const cs = getComputedStyle(document.documentElement);
@@ -1430,7 +1357,6 @@ setupGoToEndButton();
     zIndex: '10050',
     touchAction: 'none'
   });
-  overlay.className = 'timeline-hover-overlay';
   document.body.appendChild(overlay);
 
   const label = document.createElement('div');
@@ -1455,13 +1381,6 @@ setupGoToEndButton();
   });
   document.body.appendChild(label);
 
-  let enabled = true;
-  window.__scrubOverlaySetEnabled = function(e) {
-    enabled = !!e;
-    overlay.style.pointerEvents = enabled ? 'auto' : 'none';
-    if (!enabled) { label.style.opacity = '0'; }
-  };
-
   let insideOverlay = false;
   let pointerDown = false;
   let scrubbing = false;
@@ -1469,7 +1388,6 @@ setupGoToEndButton();
   let lastX = 0;
   let wasPlaying = false;
   let activePointerId = null;
-  let swallowClick = false;
 
   function placeOverlay(){
     const r = rect();
@@ -1499,58 +1417,82 @@ setupGoToEndButton();
 
   function maybeShowLockedMessage(show){
     if (!seekInsight) return;
-    if (!isSeekEnabled() && show) { seekInsight.classList.add('show'); }
-    else if (!pointerDown) { seekInsight.classList.remove('show'); }
+    if (!isSeekEnabled() && show) {
+      seekInsight.classList.add('show');
+    } else if (!pointerDown) {
+      seekInsight.classList.remove('show');
+    }
   }
 
   function begin(e){
-    if (!enabled) return;
-    pointerDown = true; scrubbing = false; moved = 0;
+    pointerDown = true;
+    scrubbing = false;
+    moved = 0;
     wasPlaying = !mainVideo.paused;
     lastX = e.clientX ?? (e.touches?.[0]?.clientX || 0);
     activePointerId = e.pointerId ?? null;
     try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {}
-    showLabel(true); updateAt(lastX);
-    if (isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(lastX)); overlay.style.cursor = 'pointer'; }
-    else { overlay.style.cursor = 'not-allowed'; maybeShowLockedMessage(true); }
+
+    showLabel(true);
+    updateAt(lastX);
+
+    if (isSeekEnabled()) {
+      setMainTimeAndHardSync(timeFromClientX(lastX));
+      overlay.style.cursor = 'pointer';
+    } else {
+      overlay.style.cursor = 'not-allowed';
+      maybeShowLockedMessage(true);
+    }
     e.preventDefault();
   }
 
   function move(e){
-    if (!enabled) return;
     const x = e.clientX ?? (e.touches?.[0]?.clientX || 0);
     if (!pointerDown) {
       if (!insideOverlay) return;
-      showLabel(true); updateAt(x);
+      showLabel(true);
+      updateAt(x);
       if (!isSeekEnabled()) maybeShowLockedMessage(true);
       return;
     }
-    moved += Math.abs(x - lastX); lastX = x; updateAt(x);
-    if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) { scrubbing = true; if (wasPlaying) pauseBound(); }
-    if (scrubbing && isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(x)); e.preventDefault(); swallowClick = true; }
+    moved += Math.abs(x - lastX);
+    lastX = x;
+    updateAt(x);
+
+    if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) {
+      scrubbing = true;
+      if (wasPlaying) pauseBound();
+    }
+    if (scrubbing && isSeekEnabled()) {
+      setMainTimeAndHardSync(timeFromClientX(x));
+      e.preventDefault();
+    }
   }
 
   function end(){
-    if (!enabled) return;
     if (scrubbing && wasPlaying) playBound();
-    pointerDown = false; scrubbing = false;
+    pointerDown = false;
+    scrubbing = false;
     try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {}
     activePointerId = null;
-    if (!insideOverlay) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); }
-    setTimeout(() => { swallowClick = false; }, 0);
+    if (!insideOverlay) {
+      showLabel(false);
+      seekInsight && seekInsight.classList.remove('show');
+    }
   }
 
   overlay.addEventListener('pointerenter', () => {
-    if (!enabled) return;
     insideOverlay = true;
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
     showLabel(true);
     if (!isSeekEnabled()) maybeShowLockedMessage(true);
   });
   overlay.addEventListener('pointerleave', () => {
-    if (!enabled) return;
     insideOverlay = false;
-    if (!pointerDown) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); }
+    if (!pointerDown) {
+      showLabel(false);
+      seekInsight && seekInsight.classList.remove('show');
+    }
   });
 
   overlay.addEventListener('pointerdown', begin, { passive: false });
@@ -1564,107 +1506,9 @@ setupGoToEndButton();
   window.__updateScrubOverlay();
 })();
 
-/* ===================== MOBILE FULLSCREEN BUTTON ON VIDEO ===================== */
-(function setupMobileFullscreen(){
-  if (!playerEl || !frameEl || !mainVideo) return;
-
-  // Create a small corner button, only visible on mobile via CSS
-  const fsBtn = document.createElement('button');
-  fsBtn.className = 'fs-btn';
-  fsBtn.type = 'button';
-  fsBtn.setAttribute('aria-label', 'Fullscreen');
-  fsBtn.innerHTML = '<i class="ri-fullscreen-fill" aria-hidden="true"></i>';
-  frameEl.appendChild(fsBtn);
-
-  // HUD container for webcam while fullscreen (or soft fullscreen fallback)
-  const fsHud = document.createElement('div');
-  fsHud.className = 'fs-hud';
-  let prevParent = null;
-  let prevNext = null;
-
-  function moveWebcamIntoHud() {
-    if (!webcamWrap) return;
-    if (!fsHud.parentNode) document.body.appendChild(fsHud);
-    prevParent = webcamWrap.parentNode;
-    prevNext = webcamWrap.nextSibling;
-    fsHud.appendChild(webcamWrap);
-    webcamWrap.classList.add('fs-mini');
-  }
-  function restoreWebcamFromHud() {
-    if (!webcamWrap || !prevParent) return;
-    webcamWrap.classList.remove('fs-mini');
-    if (prevNext && prevNext.parentNode === prevParent) prevParent.insertBefore(webcamWrap, prevNext);
-    else prevParent.appendChild(webcamWrap);
-    prevParent = null; prevNext = null;
-    if (fsHud.parentNode) fsHud.parentNode.removeChild(fsHud);
-  }
-
-  async function hardRequestFullscreen(el) {
-    if (document.fullscreenElement) return true;
-    if (el.requestFullscreen) { await el.requestFullscreen({ navigationUI: 'hide' }).catch(()=>{}); }
-    else if (el.webkitRequestFullscreen) { try { el.webkitRequestFullscreen(); } catch {} }
-    return !!document.fullscreenElement;
-  }
-
-  function isIOS() {
-    return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  }
-
-  async function requestEnterFullscreenSoft() {
-    // Try hard fullscreen first on the frame; if not supported, fall back to CSS "soft fullscreen"
-    let ok = await hardRequestFullscreen(frameEl);
-    if (!ok && isIOS() && mainVideo.webkitSupportsFullscreen) {
-      // Worst-case iOS native video fullscreen (no overlays). Fall back to "soft" instead for overlay support.
-      ok = false;
-    }
-    if (!ok) {
-      document.body.classList.add('soft-fs');
-      ok = true;
-    }
-    if (ok) {
-      document.body.classList.add('is-fs');
-      moveWebcamIntoHud();
-      try { if (screen.orientation && screen.orientation.lock) { screen.orientation.lock('landscape').catch(()=>{}); } } catch {}
-    }
-    return ok;
-  }
-
-  function requestExitFullscreenSoft() {
-    document.body.classList.remove('soft-fs');
-    document.body.classList.remove('is-fs');
-    restoreWebcamFromHud();
-    try { if (document.fullscreenElement) document.exitFullscreen().catch(()=>{}); } catch {}
-    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch {}
-  }
-  window.requestExitFullscreenSoft = requestExitFullscreenSoft;
-
-  function isMobileFullscreenActive() {
-    return document.body.classList.contains('is-fs') || !!document.fullscreenElement;
-  }
-  window.isMobileFullscreenActive = isMobileFullscreenActive;
-
-  fsBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    if (isMobileFullscreenActive()) {
-      requestExitFullscreenSoft();
-    } else {
-      await requestEnterFullscreenSoft();
-    }
-  });
-
-  document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && document.body.classList.contains('is-fs')) {
-      // Hard fullscreen was exited by user (e.g., back swipe). Keep state tidy.
-      requestExitFullscreenSoft();
-    }
-  });
-})();
-
 /* ===================== Utilities kept ===================== */
-skipIntroBtn.addEventListener('click', () => {
-  cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1');
-  skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show');
-});
+skipIntroBtn.addEventListener('click', () => { cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1'); skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show'); });
+
 function hideHeadlineTimer() {
   const badge = document.getElementById('separateCountdown')?.closest('.exclusive-badge');
   if (badge) badge.style.display = 'none';

@@ -1,21 +1,15 @@
-
 /* =====================================================
   app.js — Viewer (dynamic hydration via Supabase)
 
-  Changes in this build (mobile-focused):
-  - PIN on real devices: waits for hydration, resilient hidden input (1×1 offscreen),
-    no accidental interception by timeline overlay.
-  - Hover/drag timeline overlay init is deferred until the stage is visible.
-  - Mobile fullscreen button inside the video frame; tries true fullscreen on the
-    frame container so we can overlay the webcam in a corner.
-  - While in fullscreen we place the webcam as a tiny PiP-like bubble in the
-    chosen corner; on video end we exit fullscreen first, then show the offer.
-  - Riskline under offer buttons now hydrates from DB (removed stray token, better selectors).
-  - The variable --webcam-timeline-gap now applies with a strong rule so the
-    distance between webcam and timeline is actually controllable.
-
-  All other behavior and visuals remain exactly the same.
-===================================================== */
+  Includes:
+  - Mobile-safe PIN flow (awaits hydration; focusable tiny input; 100dvh centering)
+  - Riskline hydration fix under the offer buttons
+  - Timeline hover/drag with invisible, non-layout hitbox (+ toggleable for PIN)
+  - CSS-driven spacing knobs for messages & webcam/timeline gap
+  - Mobile fullscreen button on the video; rotates, overlays a mini-webcam;
+    exits and returns to the offer after the presentation ends.
+  - Music crossfades + end-mode webcam crossfade
+  ===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
 const ENV = window.ENV || {};
@@ -38,7 +32,7 @@ const SB = (SUPABASE_URL && SUPABASE_ANON && window.supabase)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: false } })
   : null;
 
-/* ===================== Static defaults (kept) ===================== */
+/* ===================== Static defaults ===================== */
 const EXPIRY_DAYS = 7; // fallback expiry only
 const TEST_PIN = '1234'; // only used if DB missing
 
@@ -51,7 +45,7 @@ const HYDRATE = { link: null, lead: null, pres: null, cta: {}, videos: { slidesU
 let HYDR = { started: false, done: false, notFound: false };
 let _resolveHydrate; const HYDRATE_DONE = new Promise(r => (_resolveHydrate = r));
 
-/* ===================== Elements (unchanged where not noted) ===================== */
+/* ===================== Elements ===================== */
 const nav = document.getElementById('nav');
 const navCountdown = document.getElementById('navCountdown');
 const navTimer = document.getElementById('navTimer');
@@ -71,7 +65,6 @@ if (!topDock && stage) {
   topDock.id = 'topDock';
   stage.insertBefore(topDock, stage.firstChild);
 }
-// ===== END ADD =====
 
 const playerEl = document.getElementById('player');
 const frameEl = document.getElementById('frame');
@@ -136,7 +129,7 @@ function fadeAudio(el, from, to, ms) {
   });
 }
 
-let musicEnabled = true;  // master toggle
+let musicEnabled = true;
 function pauseBothMusic() { try { bgMusic && bgMusic.pause(); } catch {}; try { endMusic && endMusic.pause(); } catch {}; }
 function playActiveMusicForState() {
   if (!musicEnabled) return;
@@ -181,7 +174,7 @@ function crossfadeBackToMainMusic() {
   ]).then(() => { try { endMusic && endMusic.pause(); } catch {}; });
 }
 
-/* ===================== Expiry countdown (original) ===================== */
+/* ===================== Expiry countdown ===================== */
 const STORAGE_KEY_EXPIRY = 'pv_link_expiry_ts';
 let expiryTS = Number(localStorage.getItem(STORAGE_KEY_EXPIRY));
 const nowTS = Date.now();
@@ -210,7 +203,7 @@ function tick() {
 setInterval(tick, 1000);
 tick();
 
-/* Month label (kept) */
+/* Month label */
 (function setMonthLabel() {
   const month = new Date().toLocaleString(undefined, { month: 'long' });
   if (ctaMonth) ctaMonth.textContent = month;
@@ -218,14 +211,13 @@ tick();
 
 /* ===================== Storage helpers ===================== */
 const STORAGE_BUCKET = (ENV.STORAGE_BUCKET || 'hello-videos');
-const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // <— slides use this
+const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // slides use this
 const CAM_BUCKET = ENV.CAM_BUCKET || 'webcam';
 const HAND_BUCKET = ENV.HAND_BUCKET || 'handcam';
 const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-// ---------- Storage helpers (public/signed URL resolution) ----------
 function partsFromPublicURL(url) {
-  const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^\/]+)\/(.+)$/);
+  const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
   return m ? { bucket: m[1], path: m[2] } : null;
 }
 
@@ -252,7 +244,7 @@ async function pickFirstStorageURLAsync(candidates) {
         const u = await storageSignedOrPublicURL(p.bucket, p.path);
         if (u) return u;
       }
-      return c.url; // non-supabase full URL (legacy)
+      return c.url;
     }
   }
   return null;
@@ -429,13 +421,13 @@ async function hydrateFromCloud() {
     const lead = (leads || [])[0] || null;
     const pres = (presArr || [])[0] || null;
 
-    // 3) Resolve media *from Storage*
+    // 3) Resolve media *from Storage* (presentation slides, primary webcam, end/hand-cam)
     const BKT = { slides: SLIDES_BUCKET, cam: CAM_BUCKET, hand: HAND_BUCKET };
 
     const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov)$/i;
     const looksLikeURL = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
     const looksLikePath = (s) => typeof s === 'string' && (VIDEO_EXT_RE.test(s) || /^(default|slides|presentation|uploads|public)\//i.test(s) || s.includes('/'));
-    const isUUID_local = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    const isUUIDLoose = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
     function deepCandidates(obj, kind, buckets, maxDepth = 4, pathSeen = new WeakSet()) {
       const out = [];
@@ -444,7 +436,7 @@ async function hydrateFromCloud() {
         if (!val) return;
         if (typeof val === 'string') {
           if (looksLikeURL(val)) out.push({ url: val });
-          else if (isUUID_local(val)) out.push({ id: val });
+          else if (isUUIDLoose(val)) out.push({ id: val });
           else if (looksLikePath(val)) out.push({ bucket: srcBucket, path: val });
         } else if (typeof val === 'object') {
           const b = val.bucket || srcBucket;
@@ -473,7 +465,7 @@ async function hydrateFromCloud() {
           }
 
           if (typeof v === 'string') {
-            if (looksLikeURL(v) || isUUID_local(v) || looksLikePath(v)) {
+            if (looksLikeURL(v) || isUUIDLoose(v) || looksLikePath(v)) {
               push(v, kind === 'slides' ? buckets.slides : buckets.cam);
               continue;
             }
@@ -517,9 +509,9 @@ async function hydrateFromCloud() {
     const vDef = (pres?.defaults?.videos) || (pres?.videos) || (pres?.media) || {};
 
     const legacySlidesUrlOverride = link?.overrides?.videos?.slidesUrl || link?.overrides?.slidesUrl || null;
-    const legacySlidesUrlDefault = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
+    const legacySlidesUrlDefault  = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
     const legacyWebcamUrlOverride = link?.overrides?.videos?.webcamUrl || link?.overrides?.webcamUrl || null;
-    const legacyWebcamUrlDefault = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
+    const legacyWebcamUrlDefault  = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
 
     function gatherVideoCandidates(v, kind, buckets) {
       if (!v) return [];
@@ -627,15 +619,15 @@ async function hydrateFromCloud() {
     const cta = { ...baseCTA, ...overCTA };
 
     const ctaResolved = {
-      stageHeadline: resolveTags(cta.stageHeadline, lead),
-      timelineWarning: resolveTags(cta.timelineWarning, lead),
-      offerHeadline: resolveTags(cta.offerHeadline, lead),
-      button: resolveTags(cta.button, lead),
-      quickReplyLabel: resolveTags(cta.quickReplyLabel, lead),
-      whatsAppLabel: resolveTags(cta.whatsAppLabel, lead),
-      whatsAppNumber: resolveTags(cta.whatsAppNumber, lead),
-      whatsAppEnabled: (cta.whatsAppEnabled !== false),
-      riskline: resolveTags(cta.riskline, lead)
+      stageHeadline:    resolveTags(cta.stageHeadline, lead),
+      timelineWarning:  resolveTags(cta.timelineWarning, lead),
+      offerHeadline:    resolveTags(cta.offerHeadline, lead),
+      button:           resolveTags(cta.button, lead),
+      quickReplyLabel:  resolveTags(cta.quickReplyLabel, lead),
+      whatsAppLabel:    resolveTags(cta.whatsAppLabel, lead),
+      whatsAppNumber:   resolveTags(cta.whatsAppNumber, lead),
+      whatsAppEnabled:  (cta.whatsAppEnabled !== false),
+      riskline:         resolveTags(cta.riskline, lead)
     };
 
     if (nameEl) nameEl.textContent = lead?.alias || lead?.nickname || '';
@@ -661,13 +653,28 @@ async function hydrateFromCloud() {
     if (goldBtnSpan && ctaResolved.button) goldBtnSpan.textContent = ctaResolved.button;
     const quickSpan = document.querySelector('#ctaVideoReply > span');
     if (quickSpan && ctaResolved.quickReplyLabel) quickSpan.textContent = ctaResolved.quickReplyLabel;
+    const waBtn = document.getElementById('ctaWhatsApp');
+    const waSpan = waBtn?.querySelector('span');
+    if (waSpan && ctaResolved.whatsAppLabel) waSpan.textContent = ctaResolved.whatsAppLabel;
+    if (waBtn) {
+      const waParent = waBtn.parentNode; const waClone = waBtn.cloneNode(true); waParent.replaceChild(waClone, waBtn);
+      if (!ctaResolved.whatsAppEnabled || !ctaResolved.whatsAppNumber) {
+        waClone.style.display = 'none';
+      } else {
+        waClone.addEventListener('click', () => {
+          const WHATSAPP_TEXT = 'Hey—just watched the video. Quick reply:';
+          const msg = encodeURIComponent(`${WHATSAPP_TEXT}\n\n[From]: ${document.title}`);
+          window.open(`https://wa.me/${encodeURIComponent(ctaResolved.whatsAppNumber)}?text=${msg}`, '_blank', 'noopener');
+        });
+      }
+    }
 
     // === Hydrate the risk line under the offer buttons (from DB) ===
     const riskTargets = [
       document.getElementById('ctaRiskline'),
       document.querySelector('.cta-riskline'),
       document.querySelector('[data-cta="riskline"]'),
-      document.querySelector('#endCta .riskline') || document.querySelector('.end-cta .riskline')
+      document.querySelector('#endCta .riskline, .end-cta .riskline')
     ].filter(Boolean);
     if (riskTargets.length) {
       riskTargets.forEach(el => {
@@ -711,13 +718,12 @@ async function hydrateFromCloud() {
     HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate();
   }
 }
-
 hydrateFromCloud();
 if (!slugFromQS) {
   hideHeadlineTimer();
 }
 
-/* ===================== Intro & stage (unchanged visuals) ===================== */
+/* ===================== Intro & stage ===================== */
 const SLIDE_DURATION_MS = 1800;
 const SHIFT_UP_PX = 110;
 const SHIFT_RIGHT_PX = 24;
@@ -744,7 +750,6 @@ function cancelIntroSequence() {
 function show(el) { el.classList.remove('hidden'); el.classList.add('fade-in'); }
 function hide(el) { el.classList.add('fade-out'); setTimeout(() => { el.classList.add('hidden'); el.classList.remove('fade-out'); }, 380); }
 
-let _hoverLabelInited = false;
 function showStage() {
   stage.classList.add('show');
   orbitReplay.classList.remove('show');
@@ -755,9 +760,6 @@ function showStage() {
   // Start main music softly
   if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} }
   stabilizeIntrigue(800);
-
-  // Defer timeline hover/drag overlay until stage visible (prevents intercepting PIN touches)
-  if (!_hoverLabelInited) { initHoverTimeLabel(); _hoverLabelInited = true; }
 }
 
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
@@ -964,92 +966,62 @@ function seekFromEvent(e) {
 }
 progress.addEventListener('click', seekFromEvent);
 progress.addEventListener('touchstart', seekFromEvent, { passive: true });
-document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
+document.addEventListener('keydown', (e) => {
+  if (isSeekEnabled()) return;
+  const k = e.key;
+  if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) {
+    e.preventDefault(); e.stopPropagation();
+  }
+}, true);
 
 /* ===================== Preview loop (muted pre-roll) ===================== */
 let previewLoopActive = true; const PREVIEW_LOOP_EPS = 0.12;
-mainVideo.addEventListener('timeupdate', () => { if (!previewLoopActive || hasClickedUnmuteOverlay) return; const d = mainVideo.duration; if (!isFinite(d) || d <= 0) return; if (mainVideo.currentTime >= d - PREVIEW_LOOP_EPS) { setMainTimeAndHardSync(0.03); ignoreSeeksUntil = performance.now() + 200; if (mainVideo.paused) mainVideo.play().catch(() => { }); } });
+mainVideo.addEventListener('timeupdate', () => {
+  if (!previewLoopActive || hasClickedUnmuteOverlay) return;
+  const d = mainVideo.duration; if (!isFinite(d) || d <= 0) return;
+  if (mainVideo.currentTime >= d - PREVIEW_LOOP_EPS) {
+    setMainTimeAndHardSync(0.03); ignoreSeeksUntil = performance.now() + 200;
+    if (mainVideo.paused) mainVideo.play().catch(() => { });
+  }
+});
 
 /* ===================== Continuous float ===================== */
-const floatStart = performance.now(); function floatRAF(now) { const t = (now - floatStart) / 1000; const x = Math.cos(t * FLOAT_SPEED_X) * FLOAT_RADIUS_X; const y = Math.sin(t * FLOAT_SPEED_Y) * FLOAT_RADIUS_Y; webcam.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`; requestAnimationFrame(floatRAF); } requestAnimationFrame(floatRAF);
+const floatStart = performance.now();
+function floatRAF(now) {
+  const t = (now - floatStart) / 1000;
+  const x = Math.cos(t * FLOAT_SPEED_X) * FLOAT_RADIUS_X;
+  const y = Math.sin(t * FLOAT_SPEED_Y) * FLOAT_RADIUS_Y;
+  webcam.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`;
+  requestAnimationFrame(floatRAF);
+}
+requestAnimationFrame(floatRAF);
 
 /* ===================== Slide mechanics ===================== */
-function slideWebcamUpSmall() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(${SHIFT_RIGHT_PX}px, ${-SHIFT_UP_PX}px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = SCALE_TOP; webcam.style.transform = `scale(1)`; webcam.classList.add('pop-pulse'); setTimeout(() => webcam.classList.remove('pop-pulse'), 450); }
-function slideWebcamDownToOrigin() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(0px, 0px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = 1; webcam.style.transform = `scale(1)`; }
+function slideWebcamUpSmall() {
+  webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
+  webcamWrap.style.transform = `translate(${SHIFT_RIGHT_PX}px, ${-SHIFT_UP_PX}px)`;
+  webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
+  webcam.style.scale = SCALE_TOP;
+  webcam.style.transform = `scale(1)`;
+  webcam.classList.add('pop-pulse'); setTimeout(() => webcam.classList.remove('pop-pulse'), 450);
+}
+function slideWebcamDownToOrigin() {
+  webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
+  webcamWrap.style.transform = `translate(0px, 0px)`;
+  webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`;
+  webcam.style.scale = 1; webcam.style.transform = `scale(1)`;
+}
 
 /* ===================== Orbit positioning ===================== */
-function positionOrbitOnRim(angleDeg = 315) { if (!webcam || !orbitReplay) return; orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%'; const r = webcam.offsetWidth / 2; if (!r) return; const theta = (angleDeg * Math.PI) / 180; const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r; orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`; }
+function positionOrbitOnRim(angleDeg = 315) {
+  if (!webcam || !orbitReplay) return;
+  orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%';
+  const r = webcam.offsetWidth / 2; if (!r) return;
+  const theta = (angleDeg * Math.PI) / 180;
+  const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r;
+  orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`;
+}
 window.addEventListener('resize', () => positionOrbitOnRim());
-
-/* ===================== Fullscreen helpers (mobile button inside frame) ===================== */
-function isFullscreenActive() {
-  return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
-}
-async function requestFullscreenFor(el) {
-  if (!el) return;
-  try {
-    if (el.requestFullscreen) await el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-    else if (el.msRequestFullscreen) await el.msRequestFullscreen();
-  } catch {}
-}
-async function exitFullscreen() {
-  try {
-    if (document.exitFullscreen) await document.exitFullscreen();
-    else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
-    else if (document.msExitFullscreen) await document.msExitFullscreen();
-  } catch {}
-}
-async function lockLandscapeIfPossible() {
-  try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape'); } catch {}
-}
-
-function ensureWebcamInsideFrameForFS() {
-  if (!frameEl || !webcamWrap) return;
-  if (webcamWrap.parentNode !== frameEl) frameEl.appendChild(webcamWrap);
-}
-function restoreWebcamParentAfterFS() {
-  try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch {}
-}
-
-function setupFullscreenButton() {
-  if (!frameEl) return;
-  let btn = document.getElementById('fsBtn');
-  if (!btn) {
-    btn = document.createElement('button');
-    btn.id = 'fsBtn';
-    btn.type = 'button';
-    btn.setAttribute('aria-label', 'Fullscreen');
-    btn.innerHTML = '<i class="ri-fullscreen-fill" aria-hidden="true"></i>';
-    frameEl.appendChild(btn);
-  }
-  btn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    if (!isFullscreenActive()) {
-      ensureWebcamInsideFrameForFS();
-      await requestFullscreenFor(frameEl);
-      document.body.classList.add('fs-active');
-      await lockLandscapeIfPossible();
-    } else {
-      await exitFullscreen();
-    }
-  });
-
-  function onFSChange() {
-    const active = isFullscreenActive();
-    document.body.classList.toggle('fs-active', !!active);
-    if (!active) {
-      restoreWebcamParentAfterFS();
-    } else {
-      ensureWebcamInsideFrameForFS();
-    }
-    // Make sure orbit button remains positioned
-    setTimeout(() => positionOrbitOnRim(315), 60);
-  }
-  document.addEventListener('fullscreenchange', onFSChange);
-  document.addEventListener('webkitfullscreenchange', onFSChange);
-}
-setupFullscreenButton();
 
 /* ===================== End state + crossfade + OFFER SFX & MUSIC ===================== */
 function showEndUI() {
@@ -1061,12 +1033,16 @@ function showEndUI() {
   endCta.setAttribute('aria-hidden', 'false');
   brandMarquee?.classList.add('show');
   brandMarquee?.setAttribute('aria-hidden', 'false');
+
   try { sfxOffer.currentTime = 0; sfxOffer.play().catch(() => { }); } catch { };
+
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = 'none';
   }
+
   crossfadeToEndMusic();
+
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
   setTimeout(() => { positionOrbitOnRim(315); }, 50);
 }
@@ -1078,11 +1054,14 @@ function hideEndUI() {
   endCta.classList.add('hidden');
   endCta.setAttribute('aria-hidden', 'true');
   brandMarquee?.classList.remove('show');
+
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = isSeekEnabled() ? '' : 'none';
   }
+
   crossfadeBackToMainMusic();
+
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
   setTimeout(() => { positionOrbitOnRim(315); }, 50);
 }
@@ -1100,7 +1079,7 @@ function crossfadeToWebcamEnd(delayMs = 1000) {
 }
 function crossfadeBackToWebcamPrimary() { enterNormalMode(); webcamVideo.play().catch(() => { }); }
 
-mainVideo.addEventListener('ended', async () => {
+mainVideo.addEventListener('ended', () => {
   if (!hasClickedUnmuteOverlay) {
     setMainTimeAndHardSync(0.03);
     ignoreSeeksUntil = performance.now() + 200;
@@ -1108,10 +1087,8 @@ mainVideo.addEventListener('ended', async () => {
     return;
   }
   maybeUnlockSeekOnEnd();
-  // If we’re in fullscreen, exit first so the offer shows in normal orientation/layout
-  if (isFullscreenActive()) {
-    await exitFullscreen();
-  }
+  // If we are in mobile fullscreen, exit it before showing offer
+  if (isMobileFullscreenActive()) { requestExitFullscreenSoft(); }
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
   navTimer?.classList.add('hide');
@@ -1148,9 +1125,11 @@ function maybeUnlockSeekOnEnd() { if (unmutedSessionStartedAtZero && !mainVideo.
 document.getElementById('ctaSession')?.addEventListener('click', () => { window.open('https://calendly.com/rnq/30min', '_blank', 'noopener'); });
 document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('Record a quick reply clicked'); });
 function goToEndNow() {
-  if (!isSeekEnabled()) return; // only after first full watch
+  if (!isSeekEnabled()) return;
   try { mainVideo.pause(); } catch { }
   try { webcamVideo.pause(); } catch { }
+
+  if (isMobileFullscreenActive()) { requestExitFullscreenSoft(); }
 
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
@@ -1161,92 +1140,159 @@ function goToEndNow() {
   crossfadeToWebcamEnd(100);
 }
 
-/* ===================== Seamless marquee (kept) ===================== */
-(function setupMarquee() { if (!brandTrack) return; const container = brandTrack.parentElement; const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true)); function ensureFill() { brandTrack.innerHTML = ''; baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); while (brandTrack.scrollWidth < container.clientWidth * 2) { baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } ensureFill(); const PX_PER_SEC = 120; const setDur = () => { const totalWidth = brandTrack.scrollWidth; const dur = (totalWidth / 2) / PX_PER_SEC; brandTrack.style.animationDuration = `${dur}s`; }; setDur(); let rAF = null; window.addEventListener('resize', () => { if (rAF) cancelAnimationFrame(rAF); rAF = requestAnimationFrame(() => { ensureFill(); setDur(); positionIntrigueBetween(); }); }); })();
+/* ===================== Seamless marquee ===================== */
+(function setupMarquee() {
+  if (!brandTrack) return;
+  const container = brandTrack.parentElement;
+  const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true));
+  function ensureFill() {
+    brandTrack.innerHTML = '';
+    baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
+    while (brandTrack.scrollWidth < container.clientWidth * 2) {
+      baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
+    }
+    baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true)));
+  }
+  ensureFill();
+  const PX_PER_SEC = 120;
+  const setDur = () => {
+    const totalWidth = brandTrack.scrollWidth;
+    const dur = (totalWidth / 2) / PX_PER_SEC;
+    brandTrack.style.animationDuration = `${dur}s`;
+  };
+  setDur();
+  let rAF = null;
+  window.addEventListener('resize', () => {
+    if (rAF) cancelAnimationFrame(rAF);
+    rAF = requestAnimationFrame(() => {
+      ensureFill(); setDur(); positionIntrigueBetween();
+    });
+  });
+})();
 
-/* ===================== PIN overlay logic (now waits for hydration) ===================== */
+/* ===================== PIN overlay logic (MOBILE-SAFE) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
   const pinError = document.getElementById('pinError');
-  const digits = [];
-  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
+  if (!pinOverlay || !pinBoxes) return;
 
-  // Mobile-friendly hidden input (1×1 offscreen, not 0×0)
+  // Disable timeline hover/scrub overlay while PIN is active (prevents touch stealing)
+  try { window.__scrubOverlaySetEnabled && window.__scrubOverlaySetEnabled(false); } catch {}
+
+  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
+  const digits = [];
+  const PIN_MAX = 4;
+
+  // A tiny, visible-to-the-browser input. Must be focusable on iOS/Android.
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
   pinInput.pattern = '[0-9]*';
   pinInput.autocomplete = 'one-time-code';
-  pinInput.maxLength = 4;
+  pinInput.maxLength = PIN_MAX;
+  pinInput.autocapitalize = 'off';
+  pinInput.autocorrect = 'off';
+  pinInput.spellcheck = false;
+  pinInput.enterKeyHint = 'done';
+
   Object.assign(pinInput.style, {
-    position: 'absolute',
-    left: '-9999px',
-    top: '0',
+    position: 'fixed',
+    left: '50%',
+    top: '50%',
+    transform: 'translate(-50%, -50%)',
     width: '1px',
     height: '1px',
-    opacity: '0'
+    opacity: '0.01',
+    background: 'transparent',
+    color: 'transparent',
+    border: '0',
+    outline: '0',
+    zIndex: '100000',
+    pointerEvents: 'auto'
   });
   pinOverlay.appendChild(pinInput);
 
-  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); } catch { } }, 0); }
-  pinOverlay.addEventListener('click', focusPinInputSoon);
-  pinOverlay.addEventListener('touchstart', focusPinInputSoon, { passive: true });
-
-  function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); }
-  function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); }
-  function clearDigits() { digits.length = 0; render(); }
-  function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
-  function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
-
-  // Only validate AFTER hydration so PIN_EXPECTED is correct on first try
-  let hydratedOnce = false;
-  HYDRATE_DONE.then(() => { hydratedOnce = true; });
-
-  function validateNow() {
-    if (!hydratedOnce) return; // wait for hydrate
-    if (!PIN_REQUIRED) { onPass(); return; }
-    if (digits.length !== 4) return;
-    const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) { onPass(); }
-    else { flashError(); setTimeout(() => { clearDigits(); focusPinInputSoon(); }, 180); }
+  function render() {
+    cells.forEach((c, i) => {
+      const filled = i < digits.length;
+      c.classList.toggle('filled', filled);
+      c.textContent = filled ? '•' : '';
+    });
   }
-  async function onPass() {
+  function flashError() {
+    if (!pinError) return;
+    pinError.classList.add('show');
+    cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); });
+    setTimeout(() => pinError.classList.remove('show'), 1400);
+  }
+  function clearDigits() { digits.length = 0; render(); }
+
+  function focusPinSoon() { setTimeout(() => { try { pinInput.focus({ preventScroll: true }); } catch {} }, 0); }
+
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const recenter = () => { pinOverlay.style.setProperty('--vvh', `${vv.height}px`); };
+    vv.addEventListener('resize', recenter);
+    vv.addEventListener('scroll', recenter);
+    recenter();
+  }
+
+  pinInput.addEventListener('input', () => {
+    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, PIN_MAX);
+    digits.length = 0;
+    for (const ch of v) digits.push(ch);
+    render();
+    if (digits.length === PIN_MAX) checkIfReady();
+  });
+
+  ['click','pointerdown','touchstart'].forEach(ev =>
+    pinOverlay.addEventListener(ev, focusPinSoon, { passive: true })
+  );
+
+  function slideOutOverlay() {
+    pinOverlay.classList.add('fade-out');
+    setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
+  }
+
+  let checking = false;
+  async function checkIfReady() {
+    if (digits.length !== PIN_MAX || checking) return;
+    checking = true;
+    await HYDRATE_DONE;
+    if (!PIN_REQUIRED) { checking = false; return startAfterPin(); }
+    const attempt  = digits.join('');
+    const expected = String(PIN_EXPECTED || '').trim();
+    if (attempt === expected) {
+      checking = false;
+      startAfterPin();
+    } else {
+      flashError();
+      setTimeout(() => { clearDigits(); pinInput.value = ''; focusPinSoon(); checking = false; }, 180);
+    }
+  }
+
+  async function startAfterPin() {
     slideOutOverlay();
-    try { pinInput.blur(); } catch { }
-    await HYDRATE_DONE; // ensure data is ready
+    try { pinInput.blur(); } catch {}
+    try { window.__scrubOverlaySetEnabled && window.__scrubOverlaySetEnabled(true); } catch {}
+    await HYDRATE_DONE;
     if (HYDR.notFound) { showNotFound(); return; }
     runSequence();
   }
 
-  pinInput.addEventListener('input', () => {
-    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
-    digits.length = 0;
-    for (const ch of v) digits.push(ch);
-    render();
-    if (digits.length === 4) validateNow();
-  });
-
-  function onKey(e) {
-    if (!pinOverlay || pinOverlay.style.display === 'none') return;
-    const k = e.key;
-    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) validateNow(); } e.preventDefault(); return; }
-    if (k === 'Backspace' || k === 'Delete') { if (digits.length > 0) { digits.pop(); render(); playPinSound(); } e.preventDefault(); return; }
-  }
-  document.addEventListener('keydown', onKey, true);
-  render();
-  focusPinInputSoon();
-
-  (async function waitForPinDecision() {
+  (async function waitForDecision() {
     await HYDRATE_DONE;
-    if (!PIN_REQUIRED) { onPass(); }
+    if (!PIN_REQUIRED) startAfterPin();
   })();
+
+  render();
+  focusPinSoon();
 })();
 
-/* ===================== Music navbar toggle (controls both tracks) ===================== */
+/* ===================== Music navbar toggle ===================== */
 (function setupMusicToggle() {
   if (!musicToggle) return;
-
   if (bgMusic) setVolumeSafe(bgMusic, MUSIC.MAIN_VOL);
   if (endMusic) setVolumeSafe(endMusic, 0);
 
@@ -1256,11 +1302,7 @@ function goToEndNow() {
   }
   musicToggle.addEventListener('click', () => {
     musicEnabled = !musicEnabled;
-    if (!musicEnabled) {
-      pauseBothMusic();
-    } else {
-      playActiveMusicForState();
-    }
+    if (!musicEnabled) { pauseBothMusic(); } else { playActiveMusicForState(); }
     updateBtn();
   });
 
@@ -1275,22 +1317,17 @@ function goToEndNow() {
 function applySeekInsightStyleFromCSS() {
   if (!seekInsight) return;
   const cs = getComputedStyle(document.documentElement);
-
   const gap = (cs.getPropertyValue('--seekinsight-gap') || '').trim() || '10px';
   const z   = (cs.getPropertyValue('--seekinsight-z') || '').trim() || '10060';
   const w   = (cs.getPropertyValue('--seekinsight-width') || '').trim();
-
   seekInsight.style.marginTop = gap;
   seekInsight.style.zIndex = String(parseInt(z, 10) || 10060);
-  if (w) {
-    seekInsight.style.maxWidth = w;
-    seekInsight.style.width = 'auto';
-  }
+  if (w) { seekInsight.style.maxWidth = w; seekInsight.style.width = 'auto'; }
 }
 applySeekInsightStyleFromCSS();
 window.addEventListener('resize', applySeekInsightStyleFromCSS);
 
-/* ===================== Setup Go-to-End & mobile docking ===================== */
+/* ===================== Setup Go-to-End container & mobile docking ===================== */
 function setupGoToEndButton() {
   if (!playerEl) return;
 
@@ -1348,7 +1385,6 @@ function setupGoToEndButton() {
   }
 
   window.__relocateWebcamForSmall = relocateWebcamForSmall;
-
   relocateWebcamForSmall();
   window.addEventListener('resize', relocateWebcamForSmall);
 
@@ -1356,8 +1392,8 @@ function setupGoToEndButton() {
 }
 setupGoToEndButton();
 
-/* ===================== HOVER/CURSOR TIME LABEL (init deferred) ===================== */
-function initHoverTimeLabel(){
+/* ===================== HOVER/CURSOR TIME LABEL (overlay hitbox) ===================== */
+(function setupHoverTimeLabel(){
   if (!progress || !mainVideo) return;
 
   const HITBOX_PAD = 16;     // easier finger grab without layout shift
@@ -1369,7 +1405,7 @@ function initHoverTimeLabel(){
     const px = parseFloat(v);
     return Number.isFinite(px) ? px : 8;
   }
-  const clampLocal = (n, a, b) => Math.max(a, Math.min(b, n));
+  const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
   const fmtClock = (sec) => {
     sec = Math.max(0, Math.floor(sec || 0));
     const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
@@ -1380,7 +1416,7 @@ function initHoverTimeLabel(){
   const duration = () => (isFinite(mainVideo.duration) ? mainVideo.duration : 0);
   const timeFromClientX = (clientX) => {
     const r = rect();
-    const x = clampLocal(clientX - r.left, 0, r.width);
+    const x = clamp(clientX - r.left, 0, r.width);
     const ratio = r.width ? x / r.width : 0;
     return ratio * duration();
   };
@@ -1394,6 +1430,7 @@ function initHoverTimeLabel(){
     zIndex: '10050',
     touchAction: 'none'
   });
+  overlay.className = 'timeline-hover-overlay';
   document.body.appendChild(overlay);
 
   const label = document.createElement('div');
@@ -1418,6 +1455,13 @@ function initHoverTimeLabel(){
   });
   document.body.appendChild(label);
 
+  let enabled = true;
+  window.__scrubOverlaySetEnabled = function(e) {
+    enabled = !!e;
+    overlay.style.pointerEvents = enabled ? 'auto' : 'none';
+    if (!enabled) { label.style.opacity = '0'; }
+  };
+
   let insideOverlay = false;
   let pointerDown = false;
   let scrubbing = false;
@@ -1425,6 +1469,7 @@ function initHoverTimeLabel(){
   let lastX = 0;
   let wasPlaying = false;
   let activePointerId = null;
+  let swallowClick = false;
 
   function placeOverlay(){
     const r = rect();
@@ -1438,7 +1483,7 @@ function initHoverTimeLabel(){
 
   function moveLabelTo(clientX){
     const r = rect();
-    const x = clampLocal(clientX, r.left, r.right);
+    const x = clamp(clientX, r.left, r.right);
     const gap = getLabelGap();
     const topY = r.top - gap - (label.offsetHeight || 18);
     label.style.left = `${Math.round(x)}px`;
@@ -1454,89 +1499,58 @@ function initHoverTimeLabel(){
 
   function maybeShowLockedMessage(show){
     if (!seekInsight) return;
-    if (!isSeekEnabled() && show) {
-      seekInsight.classList.add('show');
-    } else if (!pointerDown) {
-      seekInsight.classList.remove('show');
-    }
+    if (!isSeekEnabled() && show) { seekInsight.classList.add('show'); }
+    else if (!pointerDown) { seekInsight.classList.remove('show'); }
   }
 
   function begin(e){
-    pointerDown = true;
-    scrubbing = false;
-    moved = 0;
+    if (!enabled) return;
+    pointerDown = true; scrubbing = false; moved = 0;
     wasPlaying = !mainVideo.paused;
     lastX = e.clientX ?? (e.touches?.[0]?.clientX || 0);
     activePointerId = e.pointerId ?? null;
-
     try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {}
-
-    showLabel(true);
-    updateAt(lastX);
-
-    if (isSeekEnabled()) {
-      setMainTimeAndHardSync(timeFromClientX(lastX));
-      overlay.style.cursor = 'pointer';
-    } else {
-      overlay.style.cursor = 'not-allowed';
-      maybeShowLockedMessage(true);
-    }
-
+    showLabel(true); updateAt(lastX);
+    if (isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(lastX)); overlay.style.cursor = 'pointer'; }
+    else { overlay.style.cursor = 'not-allowed'; maybeShowLockedMessage(true); }
     e.preventDefault();
   }
 
   function move(e){
+    if (!enabled) return;
     const x = e.clientX ?? (e.touches?.[0]?.clientX || 0);
-
     if (!pointerDown) {
       if (!insideOverlay) return;
-      showLabel(true);
-      updateAt(x);
+      showLabel(true); updateAt(x);
       if (!isSeekEnabled()) maybeShowLockedMessage(true);
       return;
     }
-
-    moved += Math.abs(x - lastX);
-    lastX = x;
-    updateAt(x);
-
-    if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) {
-      scrubbing = true;
-      if (wasPlaying) pauseBound();
-    }
-
-    if (scrubbing && isSeekEnabled()) {
-      setMainTimeAndHardSync(timeFromClientX(x));
-      e.preventDefault();
-    }
+    moved += Math.abs(x - lastX); lastX = x; updateAt(x);
+    if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) { scrubbing = true; if (wasPlaying) pauseBound(); }
+    if (scrubbing && isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(x)); e.preventDefault(); swallowClick = true; }
   }
 
   function end(){
+    if (!enabled) return;
     if (scrubbing && wasPlaying) playBound();
-    pointerDown = false;
-    scrubbing = false;
-
+    pointerDown = false; scrubbing = false;
     try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {}
     activePointerId = null;
-
-    if (!insideOverlay) {
-      showLabel(false);
-      seekInsight && seekInsight.classList.remove('show');
-    }
+    if (!insideOverlay) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); }
+    setTimeout(() => { swallowClick = false; }, 0);
   }
 
   overlay.addEventListener('pointerenter', () => {
+    if (!enabled) return;
     insideOverlay = true;
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
     showLabel(true);
     if (!isSeekEnabled()) maybeShowLockedMessage(true);
   });
   overlay.addEventListener('pointerleave', () => {
+    if (!enabled) return;
     insideOverlay = false;
-    if (!pointerDown) {
-      showLabel(false);
-      seekInsight && seekInsight.classList.remove('show');
-    }
+    if (!pointerDown) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); }
   });
 
   overlay.addEventListener('pointerdown', begin, { passive: false });
@@ -1548,11 +1562,109 @@ function initHoverTimeLabel(){
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
   };
   window.__updateScrubOverlay();
-}
+})();
+
+/* ===================== MOBILE FULLSCREEN BUTTON ON VIDEO ===================== */
+(function setupMobileFullscreen(){
+  if (!playerEl || !frameEl || !mainVideo) return;
+
+  // Create a small corner button, only visible on mobile via CSS
+  const fsBtn = document.createElement('button');
+  fsBtn.className = 'fs-btn';
+  fsBtn.type = 'button';
+  fsBtn.setAttribute('aria-label', 'Fullscreen');
+  fsBtn.innerHTML = '<i class="ri-fullscreen-fill" aria-hidden="true"></i>';
+  frameEl.appendChild(fsBtn);
+
+  // HUD container for webcam while fullscreen (or soft fullscreen fallback)
+  const fsHud = document.createElement('div');
+  fsHud.className = 'fs-hud';
+  let prevParent = null;
+  let prevNext = null;
+
+  function moveWebcamIntoHud() {
+    if (!webcamWrap) return;
+    if (!fsHud.parentNode) document.body.appendChild(fsHud);
+    prevParent = webcamWrap.parentNode;
+    prevNext = webcamWrap.nextSibling;
+    fsHud.appendChild(webcamWrap);
+    webcamWrap.classList.add('fs-mini');
+  }
+  function restoreWebcamFromHud() {
+    if (!webcamWrap || !prevParent) return;
+    webcamWrap.classList.remove('fs-mini');
+    if (prevNext && prevNext.parentNode === prevParent) prevParent.insertBefore(webcamWrap, prevNext);
+    else prevParent.appendChild(webcamWrap);
+    prevParent = null; prevNext = null;
+    if (fsHud.parentNode) fsHud.parentNode.removeChild(fsHud);
+  }
+
+  async function hardRequestFullscreen(el) {
+    if (document.fullscreenElement) return true;
+    if (el.requestFullscreen) { await el.requestFullscreen({ navigationUI: 'hide' }).catch(()=>{}); }
+    else if (el.webkitRequestFullscreen) { try { el.webkitRequestFullscreen(); } catch {} }
+    return !!document.fullscreenElement;
+  }
+
+  function isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
+  async function requestEnterFullscreenSoft() {
+    // Try hard fullscreen first on the frame; if not supported, fall back to CSS "soft fullscreen"
+    let ok = await hardRequestFullscreen(frameEl);
+    if (!ok && isIOS() && mainVideo.webkitSupportsFullscreen) {
+      // Worst-case iOS native video fullscreen (no overlays). Fall back to "soft" instead for overlay support.
+      ok = false;
+    }
+    if (!ok) {
+      document.body.classList.add('soft-fs');
+      ok = true;
+    }
+    if (ok) {
+      document.body.classList.add('is-fs');
+      moveWebcamIntoHud();
+      try { if (screen.orientation && screen.orientation.lock) { screen.orientation.lock('landscape').catch(()=>{}); } } catch {}
+    }
+    return ok;
+  }
+
+  function requestExitFullscreenSoft() {
+    document.body.classList.remove('soft-fs');
+    document.body.classList.remove('is-fs');
+    restoreWebcamFromHud();
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(()=>{}); } catch {}
+    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch {}
+  }
+  window.requestExitFullscreenSoft = requestExitFullscreenSoft;
+
+  function isMobileFullscreenActive() {
+    return document.body.classList.contains('is-fs') || !!document.fullscreenElement;
+  }
+  window.isMobileFullscreenActive = isMobileFullscreenActive;
+
+  fsBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (isMobileFullscreenActive()) {
+      requestExitFullscreenSoft();
+    } else {
+      await requestEnterFullscreenSoft();
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && document.body.classList.contains('is-fs')) {
+      // Hard fullscreen was exited by user (e.g., back swipe). Keep state tidy.
+      requestExitFullscreenSoft();
+    }
+  });
+})();
 
 /* ===================== Utilities kept ===================== */
-skipIntroBtn.addEventListener('click', () => { cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1'); skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show'); });
-
+skipIntroBtn.addEventListener('click', () => {
+  cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1');
+  skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show');
+});
 function hideHeadlineTimer() {
   const badge = document.getElementById('separateCountdown')?.closest('.exclusive-badge');
   if (badge) badge.style.display = 'none';

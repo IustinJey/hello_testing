@@ -1,82 +1,74 @@
 /* ====================================================================
-   RESPONSIVENESS — flexible knobs with your proven working defaults
+   RESPONSIVENESS — knobs + fixes (PIN centering, seek insight z/width,
+   webcam↔timeline gap variable applied via JS + this fallback)
    ==================================================================== */
 
-/* Hidden by default; app.js inserts this just under .nav/.stage */
+/* Hidden by default; app.js creates and inserts this just under .nav/.stage */
 #topDock { display: none; }
 
-/* ------------------------------
-   Global knobs (change numbers here)
-   ------------------------------ */
 :root {
-  /* Layout constants */
   --nav-height: 64px;
 
-  /* Mobile — OFFER (end screen) defaults */
-  --offer-stage-top-padding-mobile: 76px;  /* = 64px nav + ~12px breathing */
-  --topdock-margin-top: 50px;              /* space under nav/timer → webcam */
-  --topdock-margin-bottom: 50px;           /* space under webcam → offer */
-  --topdock-padding-x: 12px;               /* left/right padding inside dock */
+  /* Offer (end screen) spacing */
+  --offer-stage-top-padding-mobile: 76px;
+  --topdock-margin-top: 50px;
+  --topdock-margin-bottom: 50px;
+  --topdock-padding-x: 12px;
 
-  /* Docked (end) webcam size — clamp(min, vw, max) */
+  /* Docked webcam size */
   --webcam-offer-min: 150px;
   --webcam-offer-vw: 36vw;
   --webcam-offer-max: 220px;
 
-  /* Mobile — NORMAL playback (pre-offer) */
-  --goend-gap-mobile: 40px;                /* gap between button and webcam */
+  /* Normal playback spacing */
+  --goend-gap-mobile: 40px;
 
-  /* Pre-offer webcam size — clamp(min, vw, max) */
+  /* Pre-offer webcam size */
   --webcam-preoffer-min: 240px;
   --webcam-preoffer-vw: 44vw;
   --webcam-preoffer-max: 260px;
 
   /* Offer CTA block */
-  --endcta-margin-top: 10px;               /* top margin when placed in flow */
-  --endcta-max-w-px: 960px;                /* hard cap width */
-  --endcta-max-w-vw: 94vw;                 /* viewport cap */
+  --endcta-margin-top: 10px;
+  --endcta-max-w-px: 960px;
+  --endcta-max-w-vw: 94vw;
 
-  /* Optional: typography knobs */
+  /* Typography knobs */
   --font-intrigue: clamp(22px, 3.6vw, 25px);
   --font-goend: 14px;
   --font-progress-time: 11px;
 
-  /* ================= Mobile tunables for your requests ================= */
-  /* Distance between seek-locked message and the bar */
+  /* Seek insight (lock message) */
   --seekinsight-gap: 8px;
-  /* Force it on top; increase if navbar uses a higher stacking context */
   --seekinsight-z: 10060;
-  /* Control message width (set to e.g. min(92vw, 360px)) */
-  --seekinsight-width: 320px;
+  --seekinsight-width: 320px; /* override as needed */
 
-  /* Distance between floating hover time label and the bar */
+  /* Hover time label gap */
   --seeklabel-gap: 8px;
 
-  /* Distance between (mobile-docked) webcam and the progress/timeline below it */
+  /* Gap between webcam (docked below) and timeline */
   --webcam-timeline-gap: 12px;
 }
 
-/* Desktop defaults */
 :root {
-  --intrigue-gap-top: -200px;     /* NAV → Intrigue */
-  --intrigue-gap-bottom: -200px;  /* Intrigue → Player */
+  --intrigue-gap-top: -200px;
+  --intrigue-gap-bottom: -200px;
 }
-
-/* Mobile overrides */
 @media (max-width: 768px) {
-  :root { --intrigue-gap-top: 14px; --intrigue-gap-bottom: 12px; }
+  :root {
+    --intrigue-gap-top: 14px;
+    --intrigue-gap-bottom: 12px;
+  }
 }
 
-/* Keep typography easy to tune */
 .intrigue h3 { font-size: var(--font-intrigue); }
 .go-end-btn { font-size: var(--font-goend); }
 .progress__time { font-size: var(--font-progress-time); }
 
 /* ------------------------------
-   Mobile rules (<=768px) — EXACT behavior you liked
+   Mobile rules (<=768px)
    ------------------------------ */
 @media (max-width: 768px) {
-  /* ===== Offer mode (end screen) ===== */
   body.offer-mode .stage {
     justify-content: flex-start !important;
     align-items: center;
@@ -84,19 +76,12 @@
     min-height: 100vh;
   }
 
-  #topDock {
-    display: block;
-    width: 100%;
-    margin: var(--topdock-margin-top) auto var(--topdock-margin-bottom);
-    padding: 0 var(--topdock-padding-x);
-  }
+  #topDock { display: block; width: 100%; margin: var(--topdock-margin-top) auto var(--topdock-margin-bottom); padding: 0 var(--topdock-padding-x); }
 
   body.offer-mode #topDock .webcam-wrap {
     position: static !important;
-    right: auto !important;
-    bottom: auto !important;
-    transform: none !important;
-    z-index: 1 !important; /* always under the fixed navbar */
+    right: auto !important; bottom: auto !important; transform: none !important;
+    z-index: 1 !important;
     width: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
     height: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
     margin: 0 auto;
@@ -105,49 +90,30 @@
   body.offer-mode .player.content-hidden .end-cta {
     position: static !important;
     inset: auto !important;
-    display: grid;
-    place-items: center;
+    display: grid; place-items: center;
     margin: var(--endcta-margin-top) auto 0;
-    width: 100%;
-    max-width: min(var(--endcta-max-w-px), var(--endcta-max-w-vw));
+    width: 100%; max-width: min(var(--endcta-max-w-px), var(--endcta-max-w-vw));
   }
 
-  /* ===== Normal playback (no offer) ===== */
-  .go-end-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--goend-gap-mobile);
-  }
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
 
   .go-end-wrap .webcam-wrap {
-    position: static !important;
-    right: auto !important;
-    bottom: auto !important;
-    transform: none !important;
+    position: static !important; right: auto !important; bottom: auto !important; transform: none !important;
     width: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
     height: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
     margin: 0 auto 0;
   }
 }
 
-/* Tablet safety */
 @media (min-width: 769px) and (max-width: 1024px) {
-  .go-end-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--goend-gap-mobile);
-  }
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
 }
 
-/* Navbar timer tightening on mobile */
 @media (max-width: 768px) {
   .nav .timer > span:not(.dot-red) { display: none; }
   .nav .timer { padding: 6px 10px; gap: 8px; font-size: 13px; }
 }
 
-/* Softer background blobs on mobile */
 @media (max-width: 768px) {
   .blob { opacity: .70; filter: blur(90px) saturate(.85); }
   .b3 { display: none; }
@@ -155,28 +121,13 @@
   .b2 { width: 640px; height: 640px; right: -200px; bottom: -140px; }
 }
 
-/* When the webcam is docked below the player on small screens */
+/* Webcam↔timeline gap fallback (JS also applies inline) */
 @media (max-width: 768px) {
   body[data-webcam-position="below"] #webcamWrap { margin-bottom: var(--webcam-timeline-gap); }
 }
 
-/* ===================== Tiny helpers for your specific requests ===================== */
-/* Control the seek insight (lock message) purely from CSS if you want */
-#seekInsight {
-  margin-top: var(--seekinsight-gap);
-  z-index: var(--seekinsight-z);
-  max-width: var(--seekinsight-width);
+/* PIN overlay centering + LTR digits (mobile) */
+@media (max-width: 768px) {
+  #pinOverlay { display: grid; place-items: center; }
+  #pinBoxes { direction: ltr; }
 }
-
-/* The overlay that increases the hitbox around the thin bar */
-.timeline-hover-overlay { pointer-events: auto; }
-/* While the PIN overlay is visible, prevent the overlay from stealing touches */
-#pinOverlay ~ .timeline-hover-overlay { pointer-events: none !important; }
-
-/* Make sure PIN visuals read LTR in the boxes (no accidental reverse visuals) */
-#pinBoxes { direction: ltr; }
-#pinBoxes .pin-digit { direction: ltr; unicode-bidi: plaintext; }
-
-/* Center the PIN overlay content vertically/horizontally on mobile too */
-#pinOverlay { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-

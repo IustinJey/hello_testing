@@ -1,93 +1,159 @@
-/* responsiveness.css — unchanged from your last build, included here for reference */
+/* ====================================================================
+   RESPONSIVENESS — flexible knobs (mobile spacing + seek tooltip)
+   ==================================================================== */
 
+/* Hidden by default; app.js creates and inserts this just under .nav/.stage */
+#topDock { display: none; }
+
+/* ------------------------------
+   Global knobs (change numbers here)
+   ------------------------------ */
 :root {
-  --nav-h: 52px;
-  --player-max-w: 1120px;
-  --seeklabel-gap: 10px;
+  /* Layout constants */
+  --nav-height: 64px;                 /* base navbar height from style.css */
+
+  /* Mobile — OFFER (end screen) defaults */
+  --offer-stage-top-padding-mobile: 76px;  /* = fixed nav + breathing */
+  --topdock-margin-top: 50px;              /* space under nav/timer → webcam */
+  --topdock-margin-bottom: 50px;           /* space under webcam → offer */
+  --topdock-padding-x: 12px;               /* left/right padding inside dock */
+
+  /* Docked (end) webcam size — clamp(min, vw, max) */
+  --webcam-offer-min: 150px;
+  --webcam-offer-vw: 36vw;
+  --webcam-offer-max: 220px;
+
+  /* Mobile — NORMAL playback (pre-offer) */
+  --goend-gap-mobile: 40px;               /* gap between button and webcam */
+
+  /* Pre-offer webcam size — clamp(min, vw, max) */
+  --webcam-preoffer-min: 240px;
+  --webcam-preoffer-vw: 44vw;
+  --webcam-preoffer-max: 260px;
+
+  /* Offer CTA block */
+  --endcta-margin-top: 10px;
+  --endcta-max-w-px: 960px;
+  --endcta-max-w-vw: 94vw;
+
+  /* Seek-locked message controls */
+  --seekinsight-gap: 8px;                 /* distance between tooltip and bar */
+  --seekinsight-z: 10060;                 /* above everything else */
+  --seekinsight-width: 320px;             /* max width (override as you wish) */
+
+  /* Floating hover time label offset */
+  --seeklabel-gap: 8px;
+
+  /* Distance between (mobile) webcam bubble and timeline below it */
+  --webcam-timeline-gap: 12px;            /* tweakable — if it seems ignored, see note below */
+
+  /* Optional: typography knobs */
+  --font-intrigue: clamp(22px, 3.6vw, 25px);
+  --font-goend: 14px;
+  --font-progress-time: 11px;
+}
+
+/* Desktop defaults */
+:root { --intrigue-gap-top: -200px; --intrigue-gap-bottom: -200px; }
+
+/* Mobile overrides */
+@media (max-width: 768px) {
+  :root { --intrigue-gap-top: 14px; --intrigue-gap-bottom: 12px; }
+}
+
+/* Keep typography easy to tune */
+.intrigue h3 { font-size: var(--font-intrigue); }
+.go-end-btn { font-size: var(--font-goend); }
+.progress__time { font-size: var(--font-progress-time); }
+
+/* ------------------------------
+   Mobile rules (<=768px)
+   ------------------------------ */
+@media (max-width: 768px) {
+  /* ===== Offer mode (end screen) ===== */
+  body.offer-mode .stage {
+    justify-content: flex-start !important;
+    align-items: center;
+    padding-top: var(--offer-stage-top-padding-mobile);
+    min-height: 100vh;
+  }
+
+  #topDock {
+    display: block;
+    width: 100%;
+    margin: var(--topdock-margin-top) auto var(--topdock-margin-bottom);
+    padding: 0 var(--topdock-padding-x);
+  }
+
+  body.offer-mode #topDock .webcam-wrap {
+    position: static !important;
+    right: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    z-index: 1 !important; /* always under the fixed navbar */
+    width: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
+    height: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
+    margin: 0 auto; /* centered in the dock */
+  }
+
+  /* End CTA block positioning */
+  body.offer-mode .player.content-hidden .end-cta {
+    position: static !important;
+    inset: auto !important;
+    display: grid;
+    place-items: center;
+    margin: var(--endcta-margin-top) auto 0;
+    width: 100%;
+    max-width: min(var(--endcta-max-w-px), var(--endcta-max-w-vw));
+  }
+
+  /* ===== Normal playback (no offer) ===== */
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
+
+  .go-end-wrap .webcam-wrap {
+    position: static !important;
+    right: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    width: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
+    height: clamp(var(--webcam-preoffer-min), var(--webcam-preoffer-vw), var(--webcam-preoffer-max));
+    margin: 0 auto 0;
+  }
+
+  /* Ensure pin overlay truly centers on iOS (100dvh for keyboard-safe height) */
+  #pinOverlay { position: fixed; inset: 0; display: grid; place-items: center; height: 100dvh; }
+}
+
+/* Tablet safety */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
+}
+
+/* Timer pill adjustments on mobile */
+@media (max-width: 768px) {
+  .nav .timer > span:not(.dot-red) { display: none; }
+  .nav .timer { padding: 6px 10px; gap: 8px; font-size: 13px; }
+}
+
+/* Background blobs softening on mobile (optional) */
+@media (max-width: 768px) {
+  .blob { opacity: .70; filter: blur(90px) saturate(.85); }
+  .b3 { display: none; }
+  .b1 { width: 560px; height: 560px; left: -150px; top: -120px; }
+  .b2 { width: 640px; height: 640px; right: -200px; bottom: -140px; }
+}
+
+/* ================= Mobile tunables ================= */
+:root {
+  /* Distance between seek-locked message and the bar */
   --seekinsight-gap: 8px;
   --seekinsight-z: 10060;
-  --seekinsight-width: 640px;
-  --intrigue-gap-top: 8px;
-  --intrigue-gap-bottom: 10px;
-  --intrigue-bias: 0px;
-  --webcam-timeline-gap: 10px;
+  --seekinsight-width: 320px; /* or: min(92vw, 360px) */
+  --seeklabel-gap: 8px;
+  --webcam-timeline-gap: 12px; /* used when webcam is docked below */
 }
 
-/* Base layout */
-body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; color: #0b1220; background: #0c1017; }
-#nav { position: sticky; top: 0; z-index: 10040; height: var(--nav-h); display: flex; align-items: center; justify-content: space-between; padding: 0 14px; background: rgba(7,10,15,.66); -webkit-backdrop-filter: blur(9px); backdrop-filter: blur(9px); border-bottom: 1px solid rgba(255,255,255,.06); }
-#nav.show { transform: translateZ(0); }
-
-#stage { display: none; }
-#stage.show { display: block; }
-
-#player { position: relative; max-width: var(--player-max-w); margin: 14px auto; }
-#frame { position: relative; border-radius: 16px; overflow: hidden; background: #000; aspect-ratio: 16 / 9; }
-#mainVideo { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-/* Webcam picture-in-picture overlay */
-#webcamWrap { position: absolute; right: 24px; bottom: 28px; width: min(28vw, 280px); height: auto; transform-origin: center; pointer-events: auto; }
-#webcam { position: relative; width: 100%; height: auto; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
-#webcam video { width: 100%; height: auto; display: block; }
-#webcamVideo { opacity: 1; transition: opacity 320ms ease; }
-#webcamVideo2 { opacity: 0; transition: opacity 420ms ease; }
-#webcamWrap.at-top { top: 12px; right: 12px; bottom: auto; }
-
-/* Orbit replay button */
-#orbitReplay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 5; background: #111827; color: #fff; border-radius: 999px; width: 44px; height: 44px; display: grid; place-items: center; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
-#orbitReplay.show { opacity: 1; pointer-events: auto; }
-#orbitReplay.spin { animation: spin .6s cubic-bezier(.22,1,.36,1); }
-@keyframes spin { to { transform: translate(-50%,-50%) rotate(360deg); } }
-
-/* Progress */
-#progress { position: relative; height: 8px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 10px; }
-#progress .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; transform-origin: 0 50%; transform: scaleX(0); background: linear-gradient(90deg, rgba(255,255,255,.65), rgba(255,255,255,.25)); }
-#timeLeft { font-feature-settings: "tnum" on, "ss01" on; font-variant-numeric: tabular-nums; color: rgba(255,255,255,.8); margin-left: 10px; }
-
-/* Hint overlay */
-#hintOverlay { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.60), rgba(0,0,0,.25)); color: #fff; display: grid; place-items: center; z-index: 10; transition: opacity .22s ease, visibility .22s ease; }
-#hintOverlay.hide { opacity: 0; visibility: hidden; }
-
-/* PIN overlay */
-#pinOverlay { position: fixed; inset: 0; display: grid; place-items: center; background: radial-gradient(200% 160% at 50% -30%, rgba(66,133,244,.16), rgba(13,17,23,.86)), #0c1017; z-index: 10070; }
-#pinOverlay.fade-out { opacity: 0; visibility: hidden; transition: opacity .32s ease, visibility .32s ease; }
-.pin-boxes { display: grid; grid-auto-flow: column; gap: 10px; }
-.pin-digit { width: 52px; height: 60px; display: grid; place-items: center; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 12px; font-weight: 800; font-size: 26px; color: #fff; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
-.pin-digit.filled { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.22); }
-#pinError { color: #ff7676; text-align: center; margin-top: 12px; font-weight: 600; opacity: 0; transform: translateY(-6px); transition: opacity .22s ease, transform .22s ease; }
-#pinError.show { opacity: 1; transform: translateY(0); }
-
-/* Offer / end state */
-.offer-mode #player { filter: saturate(1.08); }
-.offer-mode #brandMarquee { opacity: 1; }
-
-#brandMarquee { opacity: 0; max-width: var(--player-max-w); margin: 10px auto 0; overflow: hidden; transition: opacity .3s ease; }
-#brandMarquee .track { display: inline-flex; align-items: center; gap: 24px; white-space: nowrap; will-change: transform; animation: marquee linear infinite; }
-@keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-
-/* CTA riskline */
-.cta-riskline { font-size: 12px; color: rgba(255,255,255,.65); margin-top: 6px; }
-
-/* Go-to-End */
-.go-end-wrap { max-width: var(--player-max-w); margin: 8px auto 0; display: flex; justify-content: flex-end; padding: 0 2px; }
-.go-end-btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; font-weight: 700; border: 1px solid rgba(255,255,255,.12); background: rgba(17,24,39,.5); color: #fff; box-shadow: 0 8px 20px rgba(0,0,0,.25); }
-.go-end-btn .go-end-text { font-size: 13px; letter-spacing: .2px; }
-
-/* Intrigue line between navbar and player */
-#intrigue { position: absolute; left: 50%; transform: translateX(-50%); max-width: min(92vw, var(--player-max-w)); z-index: 10030; }
-#intrigue .ink { background: linear-gradient(90deg, #fff, rgba(255,255,255,.6)); -webkit-background-clip: text; background-clip: text; color: transparent; }
-
-/* Mobile moves webcam under the player and offers extra gap to progress */
 @media (max-width: 768px) {
-  #player { margin: 8px auto; }
-  #webcamWrap { position: static; width: min(52vw, 320px); margin-top: 10px; }
-  [data-webcam-position="below"] #webcamWrap { margin-bottom: var(--webcam-timeline-gap); }
-  .go-end-wrap { padding: 0 10px; }
-  #intrigue { position: static; transform: none; margin: 6px auto 8px; }
-}
-
-/* Very small screens */
-@media (max-width: 380px) {
-  #webcamWrap { width: 70vw; }
-  .pin-digit { width: 44px; height: 54px; font-size: 22px; }
+  /* When the webcam is docked below the player area, push timeline down */
+  body[data-webcam-position="below"] #webcamWrap { margin-bottom: var(--webcam-timeline-gap); }
 }

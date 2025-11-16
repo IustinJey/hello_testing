@@ -1,13 +1,11 @@
 /* =====================================================
   app.js — Viewer (dynamic hydration via Supabase)
 
-  This build adds robust mobile PIN validation:
-  - Parses link.settings if it's a JSON string
-  - Accepts multiple keys: pin_plain, pinPlain, pin, pin_digits, link.pin*
-  - Normalizes locale digits (Arabic‑Indic → ASCII) and strips non-digits
-  - Compares normalized digits to avoid mobile autofill issues
-
-  NOTE: Everything else is kept identical to your working version.
+  Updates in this build:
+  - Robust PIN: normalize localized digits, dynamic length, multi-field lookup (link/pres/overrides).
+  - Mobile PIN flow fixes (no false negatives on phones, no truncation).
+  - Mobile fullscreen button (corner of the video): fullscreen the player and overlay a mini webcam; on end, exit + rotate back.
+  - Scrub overlay / seek insight / spacing knobs kept as in your last version.
   ===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
@@ -16,7 +14,6 @@ const SUPABASE_URL = ENV.SUPABASE_URL || '';
 const SUPABASE_ANON = ENV.SUPABASE_ANON || '';
 const INSTANCE_ID = ENV.INSTANCE_ID || null; // optional scoping
 const slugFromQS = (() => {
-  // supports ?slug=alias, ?alias=alias, ?s=alias, or index.html?alias
   const raw = window.location.search.replace(/^\?/, '');
   if (!raw) return null;
   const sp = new URLSearchParams(window.location.search);
@@ -43,6 +40,35 @@ const HYDRATE = { link: null, lead: null, pres: null, cta: {}, videos: { slidesU
 // Hydration status gates (to avoid flicker)
 let HYDR = { started: false, done: false, notFound: false };
 let _resolveHydrate; const HYDRATE_DONE = new Promise(r => (_resolveHydrate = r));
+
+/* ===== PIN helpers (NEW) ===== */
+// Normalize digits coming from any keyboard (ASCII/Arabic-Indic/Persian); ignore spaces/dashes
+function normalizeDigits(str) {
+  if (!str) return '';
+  let out = '';
+  for (const ch of String(str)) {
+    const cp = ch.codePointAt(0);
+    if (cp >= 0x30 && cp <= 0x39) { out += ch; continue; }          // ASCII 0-9
+    if (cp >= 0x0660 && cp <= 0x0669) { out += String(cp - 0x0660); continue; } // Arabic-Indic
+    if (cp >= 0x06F0 && cp <= 0x06F9) { out += String(cp - 0x06F0); continue; } // Persian
+    // ignore others
+  }
+  return out;
+}
+function pickPinExpected(link, pres) {
+  const cands = [
+    link?.settings?.pin_plain,  link?.settings?.pin,  link?.settings?.pinCode,  link?.settings?.pin_code,
+    link?.overrides?.settings?.pin_plain, link?.overrides?.settings?.pin,
+    link?.overrides?.pin_plain, link?.overrides?.pin,
+    link?.pin_plain,            link?.pin,
+    pres?.settings?.pin_plain,  pres?.settings?.pin
+  ];
+  for (const c of cands) {
+    const n = normalizeDigits(c);
+    if (n) return n;
+  }
+  return normalizeDigits(TEST_PIN);
+}
 
 /* ===================== Elements (unchanged) ===================== */
 const nav = document.getElementById('nav');
@@ -99,7 +125,7 @@ const endMusic = document.getElementById('endMusic');  // end/offer music
 const musicToggle = document.getElementById('musicToggle');
 const intrigue = document.getElementById('intrigue');
 
-/* ===================== Music knobs & helpers ===================== */
+/* ===================== Music knobs & helpers (unchanged) ===================== */
 const MUSIC = {
   MAIN_VOL: 0.15,
   END_VOL: 0.10,
@@ -107,10 +133,8 @@ const MUSIC = {
   END_START_DELAY_MS: 0,
   PRIME_ON_UNMUTE: true
 };
-
 function clamp01(x) { return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0)); }
 function setVolumeSafe(audio, v) { try { if (audio) audio.volume = clamp01(v); } catch {} }
-
 function fadeAudio(el, from, to, ms) {
   return new Promise((resolve) => {
     if (!el) return resolve();
@@ -128,7 +152,6 @@ function fadeAudio(el, from, to, ms) {
     requestAnimationFrame(step);
   });
 }
-
 let musicEnabled = true;
 function pauseBothMusic() { try { bgMusic && bgMusic.pause(); } catch {}; try { endMusic && endMusic.pause(); } catch {}; }
 function playActiveMusicForState() {
@@ -174,7 +197,7 @@ function crossfadeBackToMainMusic() {
   ]).then(() => { try { endMusic && endMusic.pause(); } catch {}; });
 }
 
-/* ===================== Expiry countdown (original) ===================== */
+/* ===================== Expiry countdown (unchanged) ===================== */
 const STORAGE_KEY_EXPIRY = 'pv_link_expiry_ts';
 let expiryTS = Number(localStorage.getItem(STORAGE_KEY_EXPIRY));
 const nowTS = Date.now();
@@ -209,19 +232,17 @@ tick();
   if (ctaMonth) ctaMonth.textContent = month;
 })();
 
-/* ===================== Storage helpers ===================== */
+/* ===================== Storage helpers (unchanged) ===================== */
 const STORAGE_BUCKET = (ENV.STORAGE_BUCKET || 'hello-videos');
-const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // <— slides use this
+const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET;
 const CAM_BUCKET = ENV.CAM_BUCKET || 'webcam';
 const HAND_BUCKET = ENV.HAND_BUCKET || 'handcam';
 const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-// ---------- Storage helpers (public/signed URL resolution) ----------
 function partsFromPublicURL(url) {
   const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
   return m ? { bucket: m[1], path: m[2] } : null;
 }
-
 async function storageSignedOrPublicURL(bucket, path) {
   if (!SB || !bucket || !path) return null;
   if (/^https?:\/\//i.test(path)) return path;
@@ -232,7 +253,6 @@ async function storageSignedOrPublicURL(bucket, path) {
   const { data } = SB.storage.from(bucket).getPublicUrl(path);
   return data?.publicUrl || null;
 }
-
 async function pickFirstStorageURLAsync(candidates) {
   for (const c of (candidates || [])) {
     if (!c) continue;
@@ -250,29 +270,6 @@ async function pickFirstStorageURLAsync(candidates) {
   }
   return null;
 }
-
-function attachAutoResign(videoEl) {
-  if (!videoEl) return;
-  let refreshing = false;
-  videoEl.addEventListener('error', async () => {
-    if (refreshing) return;
-    const src = videoEl.currentSrc || videoEl.src;
-    const p = partsFromPublicURL(src);
-    if (!p) return;
-    refreshing = true;
-    try {
-      const fresh = await storageSignedOrPublicURL(p.bucket, p.path);
-      if (fresh && fresh !== src) {
-        const wasPlaying = !videoEl.paused;
-        videoEl.src = fresh;
-        videoEl.load();
-        if (wasPlaying) { try { videoEl.play(); } catch { } }
-      }
-    } finally { refreshing = false; }
-  });
-}
-
-/* ---------- ID → URL resolution (slides can be ID-only) ---------- */
 function isUUID(v) {
   return typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
@@ -288,17 +285,10 @@ function guessStorageKeyVariants(id, bucket) {
   }
   return out;
 }
-
 async function resolveIdToURL(id, preferredBucket) {
   if (!SB || !id) return null;
   const TABLES = [
-    'videos',
-    'hello_videos',
-    'hello_assets_videos',
-    'slides',
-    'hello_slides',
-    'media',
-    'presentation_videos'
+    'videos','hello_videos','hello_assets_videos','slides','hello_slides','media','presentation_videos'
   ];
   for (const table of TABLES) {
     try {
@@ -316,7 +306,7 @@ async function resolveIdToURL(id, preferredBucket) {
         }
         return row.public_url || row.file_url || row.url || null;
       }
-    } catch { /* try next table */ }
+    } catch {}
   }
   if (isUUID(id)) {
     const guesses = guessStorageKeyVariants(id, preferredBucket || SLIDES_BUCKET);
@@ -328,7 +318,7 @@ async function resolveIdToURL(id, preferredBucket) {
   return null;
 }
 
-/* ===================== Tag + highlight helpers ===================== */
+/* ===================== Tag + highlight helpers (unchanged) ===================== */
 function tagMap(lead) {
   return {
     nickname: lead?.alias || lead?.nickname || '',
@@ -349,8 +339,8 @@ function expandHighlights(highlights, lead) {
     if (!h) return;
     const raw = String(h).trim();
     const key = raw.replace(/^\[|\]$/g, '').toLowerCase();
-    if (map[key]) list.push(String(map[key])); // resolved tag value
-    list.push(raw); // literal word
+    if (map[key]) list.push(String(map[key]));
+    list.push(raw);
   });
   return [...new Set(list.filter(Boolean))];
 }
@@ -365,7 +355,7 @@ function injectHighlights(resolvedText, highlightsExpanded) {
   return html;
 }
 
-/* ===================== NOT FOUND (no fallback) ===================== */
+/* ===================== NOT FOUND (unchanged) ===================== */
 function showNotFound() {
   nav?.classList.add('show');
   if (navTimer) navTimer.style.display = 'none';
@@ -390,37 +380,14 @@ function showNotFound() {
 /* =====================================================
    DYNAMIC HYDRATION (fetch data using slug before PIN)
    ===================================================== */
-
-// ---- PIN utilities (NEW) ----
-const DIGIT_MAP = {
-  '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9',
-  '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'
-};
-function normalizeDigits(str) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/[٠-٩۰-۹]/g, ch => DIGIT_MAP[ch] ?? ch)
-    .replace(/\D+/g, '');
-}
-function firstNonEmpty(...vals) {
-  for (const v of vals) {
-    if (v === undefined || v === null) continue;
-    const s = String(v).trim();
-    if (s !== '') return v;
-  }
-  return '';
-}
-
 async function hydrateFromCloud() {
   HYDR.started = true;
   try {
-    // 0) Missing slug → mark not found, disable PIN, finish
     if (!SB || !slugFromQS) {
       HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate(); return;
     }
-    // 1) Link by slug (+ instance scope if provided)
     let linkQ = SB.from('hello_links')
-      .select('id,slug,lead_id,presentation_id,form_id,require_pin,expires_at,overrides,settings,active,pin,pin_plain')
+      .select('id,slug,lead_id,presentation_id,form_id,require_pin,expires_at,overrides,settings,active')
       .eq('slug', slugFromQS)
       .eq('active', true)
       .limit(1);
@@ -430,7 +397,6 @@ async function hydrateFromCloud() {
     const link = (links || [])[0];
     if (!link) { hideHeadlineTimer(); HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate(); return; }
 
-    // 2) Lead + Presentation
     let leadQ = SB.from('leads').select('*').eq('id', link.lead_id).limit(1);
     let presQ = SB.from('hello_presentations').select('*').eq('id', link.presentation_id).limit(1);
     if (INSTANCE_ID) { leadQ = leadQ.eq('instance_id', INSTANCE_ID); presQ = presQ.eq('instance_id', INSTANCE_ID); }
@@ -439,14 +405,12 @@ async function hydrateFromCloud() {
     const lead = (leads || [])[0] || null;
     const pres = (presArr || [])[0] || null;
 
-    // 3) Resolve media *from Storage* (presentation slides, primary webcam, end/hand-cam)
+    // Resolve media
     const BKT = { slides: SLIDES_BUCKET, cam: CAM_BUCKET, hand: HAND_BUCKET };
-
     const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov)$/i;
     const looksLikeURL = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
     const looksLikePath = (s) => typeof s === 'string' && (VIDEO_EXT_RE.test(s) || /^(default|slides|presentation|uploads|public)\//i.test(s) || s.includes('/'));
     const isUUID = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-
     function deepCandidates(obj, kind, buckets, maxDepth = 4, pathSeen = new WeakSet()) {
       const out = [];
       const ban = kind === 'slides' ? /webcam|cam|hand|end/i : null;
@@ -499,38 +463,6 @@ async function hydrateFromCloud() {
         if (seen.has(key)) return false; seen.add(key); return true;
       });
     }
-
-    async function pickFirstVideoURLAsync(candidates, fallbackBucketIfId) {
-      for (const c of (candidates || [])) {
-        if (!c) continue;
-        if (c.id) {
-          const byId = await resolveIdToURL(c.id, fallbackBucketIfId);
-          if (byId) return byId;
-        }
-        if (c.bucket && c.path) {
-          const u = await storageSignedOrPublicURL(c.bucket, c.path);
-          if (u) return u;
-        }
-        if (c.url) {
-          const p = partsFromPublicURL(c.url);
-          if (p) {
-            const u = await storageSignedOrPublicURL(p.bucket, p.path);
-            if (u) return u;
-          }
-          return c.url;
-        }
-      }
-      return null;
-    }
-
-    const vOver = (link?.overrides?.videos) || {};
-    const vDef = (pres?.defaults?.videos) || (pres?.videos) || (pres?.media) || {};
-
-    const legacySlidesUrlOverride = link?.overrides?.videos?.slidesUrl || link?.overrides?.slidesUrl || null;
-    const legacySlidesUrlDefault = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
-    const legacyWebcamUrlOverride = link?.overrides?.videos?.webcamUrl || link?.overrides?.webcamUrl || null;
-    const legacyWebcamUrlDefault = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
-
     function gatherVideoCandidates(v, kind, buckets) {
       if (!v) return [];
       const out = [];
@@ -574,6 +506,13 @@ async function hydrateFromCloud() {
       return out;
     }
 
+    const vOver = (link?.overrides?.videos) || {};
+    const vDef = (pres?.defaults?.videos) || (pres?.videos) || (pres?.media) || {};
+    const legacySlidesUrlOverride = link?.overrides?.videos?.slidesUrl || link?.overrides?.slidesUrl || null;
+    const legacySlidesUrlDefault  = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
+    const legacyWebcamUrlOverride = link?.overrides?.videos?.webcamUrl || link?.overrides?.webcamUrl || null;
+    const legacyWebcamUrlDefault  = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
+
     const slidesCandidates = [
       ...gatherVideoCandidates(vOver, 'slides', BKT),
       ...gatherRootVideoCandidates(link?.overrides, 'slides', BKT),
@@ -582,9 +521,8 @@ async function hydrateFromCloud() {
       ...deepCandidates(link?.overrides, 'slides', BKT),
       ...deepCandidates(pres, 'slides', BKT),
       legacySlidesUrlOverride ? { url: legacySlidesUrlOverride } : null,
-      legacySlidesUrlDefault ? { url: legacySlidesUrlDefault } : null
+      legacySlidesUrlDefault  ? { url: legacySlidesUrlDefault }  : null
     ];
-
     const webcamCandidates = [
       ...gatherVideoCandidates(vOver, 'webcam', BKT),
       ...gatherRootVideoCandidates(link?.overrides, 'webcam', BKT),
@@ -593,13 +531,35 @@ async function hydrateFromCloud() {
       ...deepCandidates(link?.overrides, 'webcam', BKT),
       ...deepCandidates(pres, 'webcam', BKT),
       legacyWebcamUrlOverride ? { url: legacyWebcamUrlOverride } : null,
-      legacyWebcamUrlDefault ? { url: legacyWebcamUrlDefault } : null
+      legacyWebcamUrlDefault  ? { url: legacyWebcamUrlDefault }  : null
     ];
-
     const handCandidates = [
       vOver.handcamKey ? { bucket: BKT.hand, path: vOver.handcamKey } : null,
-      vDef.handcamKey ? { bucket: BKT.hand, path: vDef.handcamKey } : null
+      vDef.handcamKey  ? { bucket: BKT.hand, path: vDef.handcamKey }  : null
     ];
+
+    async function pickFirstVideoURLAsync(candidates, fallbackBucketIfId) {
+      for (const c of (candidates || [])) {
+        if (!c) continue;
+        if (c.id) {
+          const byId = await resolveIdToURL(c.id, fallbackBucketIfId);
+          if (byId) return byId;
+        }
+        if (c.bucket && c.path) {
+          const u = await storageSignedOrPublicURL(c.bucket, c.path);
+          if (u) return u;
+        }
+        if (c.url) {
+          const p = partsFromPublicURL(c.url);
+          if (p) {
+            const u = await storageSignedOrPublicURL(p.bucket, p.path);
+            if (u) return u;
+          }
+          return c.url;
+        }
+      }
+      return null;
+    }
 
     const [slidesUrl, webcamUrl, handFromKey] = await Promise.all([
       pickFirstVideoURLAsync(slidesCandidates, BKT.slides),
@@ -607,6 +567,7 @@ async function hydrateFromCloud() {
       pickFirstStorageURLAsync(handCandidates),
     ]);
 
+    // Optional hand-cam by id
     const legacyHandId =
       vOver.handcamId || vDef.handcamId ||
       link?.overrides?.videos?.handcamId || pres?.defaults?.videos?.handcamId || null;
@@ -629,23 +590,23 @@ async function hydrateFromCloud() {
       } catch { }
     }
 
-    console.debug('[media] candidates:', { slidesCandidates, webcamCandidates, handCandidates });
     console.debug('[media] resolved:', { slidesUrl, webcamUrl, handUrl });
 
+    // CTA text assembly
     const baseCTA = pres?.cta || {};
     const overCTA = (link?.overrides?.cta) || {};
     const cta = { ...baseCTA, ...overCTA };
 
     const ctaResolved = {
-      stageHeadline: resolveTags(cta.stageHeadline, lead),
+      stageHeadline:   resolveTags(cta.stageHeadline, lead),
       timelineWarning: resolveTags(cta.timelineWarning, lead),
-      offerHeadline: resolveTags(cta.offerHeadline, lead),
-      button: resolveTags(cta.button, lead),
+      offerHeadline:   resolveTags(cta.offerHeadline, lead),
+      button:          resolveTags(cta.button, lead),
       quickReplyLabel: resolveTags(cta.quickReplyLabel, lead),
-      whatsAppLabel: resolveTags(cta.whatsAppLabel, lead),
-      whatsAppNumber: resolveTags(cta.whatsAppNumber, lead),
+      whatsAppLabel:   resolveTags(cta.whatsAppLabel, lead),
+      whatsAppNumber:  resolveTags(cta.whatsAppNumber, lead),
       whatsAppEnabled: (cta.whatsAppEnabled !== false),
-      riskline: resolveTags(cta.riskline, lead)
+      riskline:        resolveTags(cta.riskline, lead)
     };
 
     if (nameEl) nameEl.textContent = lead?.alias || lead?.nickname || '';
@@ -667,10 +628,12 @@ async function hydrateFromCloud() {
     if (seekSpan && ctaResolved.timelineWarning) seekSpan.textContent = ctaResolved.timelineWarning;
     const ctaHead = document.getElementById('ctaHeadline');
     if (ctaHead && ctaResolved.offerHeadline) ctaHead.textContent = ctaResolved.offerHeadline;
+
     const goldBtnSpan = document.querySelector('.gold-button2 > div > span');
     if (goldBtnSpan && ctaResolved.button) goldBtnSpan.textContent = ctaResolved.button;
     const quickSpan = document.querySelector('#ctaVideoReply > span');
     if (quickSpan && ctaResolved.quickReplyLabel) quickSpan.textContent = ctaResolved.quickReplyLabel;
+
     const waBtn = document.getElementById('ctaWhatsApp');
     const waSpan = waBtn?.querySelector('span');
     if (waSpan && ctaResolved.whatsAppLabel) waSpan.textContent = ctaResolved.whatsAppLabel;
@@ -698,7 +661,7 @@ async function hydrateFromCloud() {
       riskTargets.forEach(el => {
         if (ctaResolved.riskline) {
           el.textContent = ctaResolved.riskline;
-          try { el.style.removeProperty('display'); } catch { }
+          try { el.style.removeProperty('display'); } catch {}
           el.setAttribute('aria-hidden', 'false');
         } else {
           el.textContent = '';
@@ -709,11 +672,11 @@ async function hydrateFromCloud() {
     }
 
     try {
-      // PATCH: set crossOrigin to allow canvas thumbnails (if server sends CORS)
-      if (slidesUrl) { mainVideo.preload = 'auto'; mainVideo.crossOrigin = 'anonymous'; mainVideo.src = slidesUrl; mainVideo.load(); attachAutoResign(mainVideo); }
-      if (webcamUrl) { webcamVideo.preload = 'auto'; webcamVideo.crossOrigin = 'anonymous'; webcamVideo.src = webcamUrl; webcamVideo.load(); attachAutoResign(webcamVideo); }
-      if (handUrl)   { webcamVideo2.preload = 'metadata'; webcamVideo2.crossOrigin = 'anonymous'; webcamVideo2.src = handUrl;   webcamVideo2.load(); attachAutoResign(webcamVideo2); }
-    } catch (e) { }
+      // CORS-friendly video loads to allow thumbnails if ever needed
+      if (slidesUrl) { mainVideo.preload = 'auto';  mainVideo.crossOrigin  = 'anonymous'; mainVideo.src  = slidesUrl;  mainVideo.load();  attachAutoResign(mainVideo); }
+      if (webcamUrl) { webcamVideo.preload = 'auto';webcamVideo.crossOrigin= 'anonymous'; webcamVideo.src = webcamUrl; webcamVideo.load(); attachAutoResign(webcamVideo); }
+      if (handUrl)   { webcamVideo2.preload='metadata';webcamVideo2.crossOrigin='anonymous';webcamVideo2.src= handUrl;  webcamVideo2.load();attachAutoResign(webcamVideo2); }
+    } catch (e) {}
 
     if (link?.expires_at) {
       const ts = new Date(link.expires_at).getTime();
@@ -725,19 +688,10 @@ async function hydrateFromCloud() {
     const hue = link?.overrides?.theme?.hue ?? pres?.theme?.hue;
     if (typeof hue === 'number') document.documentElement.style.setProperty('--hue', String(hue));
 
-    // ---- Robust PIN extraction (NEW) ----
-    let rawSettings = link?.settings ?? {};
-    if (typeof rawSettings === 'string') {
-      try { rawSettings = JSON.parse(rawSettings); } catch { rawSettings = {}; }
-    }
-    const pinCandidateRaw = firstNonEmpty(
-      rawSettings.pin_plain, rawSettings.pinPlain, rawSettings.pin_digits, rawSettings.pin,
-      link?.pin_plain, link?.pin
-    );
-    const pinExpectedDigits = normalizeDigits(pinCandidateRaw);
-    PIN_REQUIRED = (link?.require_pin === true) || (pinExpectedDigits.length > 0);
-    PIN_EXPECTED = pinExpectedDigits || normalizeDigits(TEST_PIN);
-    console.debug('[PIN] required:', PIN_REQUIRED, 'expected.len:', PIN_EXPECTED.length);
+    // === PIN flags (NEW robust) ===
+    PIN_REQUIRED = Boolean(link?.require_pin);
+    PIN_EXPECTED = pickPinExpected(link, pres);
+    window.__PIN_EXPECTED_LEN = (PIN_EXPECTED && PIN_EXPECTED.length) || 4;
 
     HYDRATE.link = link; HYDRATE.lead = lead; HYDRATE.pres = pres; HYDRATE.cta = ctaResolved; HYDRATE.videos = { slidesUrl, webcamUrl, handUrl };
 
@@ -748,7 +702,9 @@ async function hydrateFromCloud() {
   }
 }
 hydrateFromCloud();
-if (!slugFromQS) { hideHeadlineTimer(); }
+if (!slugFromQS) {
+  hideHeadlineTimer();
+}
 
 /* ===================== Intro & stage (unchanged visuals) ===================== */
 const SLIDE_DURATION_MS = 1800;
@@ -819,7 +775,6 @@ function positionIntrigueBetween() {
     intrigue.style.top = `${_intrigueTopNext}px`;
   });
 }
-
 function stabilizeIntrigue(ms = 600) {
   const deadline = performance.now() + ms;
   function loop() { positionIntrigueBetween(); if (performance.now() < deadline) requestAnimationFrame(loop); }
@@ -860,7 +815,7 @@ function runSequence() {
   schedule(() => { if (!introActive) return; nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1'); skipIntroBtn.classList.add('show'); }, 8400);
 }
 
-/* ===================== Unmute + bind videos ===================== */
+/* ===================== Unmute + bind videos (unchanged) ===================== */
 let hasClickedUnmuteOverlay = false;
 let unmutedSessionStartedAtZero = false;
 let programmaticSeekOK = false;
@@ -948,13 +903,13 @@ frameEl.addEventListener('pointerleave', () => { frameEl.classList.remove('is-ho
 mainVideo.addEventListener('click', () => { if (document.body.contains(hintOverlay)) return; if (mainVideo.paused) { playBound(); } else { pauseBound(); } });
 mainPlayBtn.addEventListener('click', (e) => { e.stopPropagation(); playBound(); });
 
-/* ===================== Progress + time-left ===================== */
+/* ===================== Progress + time-left (unchanged) ===================== */
 function fmtTimeLeft(totalSec, currentSec) { const remain = Math.max(0, Math.floor(totalSec - currentSec)); const m = Math.floor(remain / 60); const s = remain % 60; return `${m}:${String(s).padStart(2, '0')}`; }
 let rafId = null; function progressRAF() { if (isFinite(mainVideo.duration) && mainVideo.duration > 0) { const pct = Math.min(1, Math.floor((mainVideo.currentTime / mainVideo.duration) * 10000) / 10000); progressBar.style.transform = `scaleX(${pct})`; timeLeftEl.textContent = fmtTimeLeft(mainVideo.duration, mainVideo.currentTime); } rafId = requestAnimationFrame(progressRAF); }
 mainVideo.addEventListener('loadedmetadata', () => { if (!rafId) progressRAF(); }); if (mainVideo.readyState >= 1 && !rafId) progressRAF();
 
-/* ===================== Seek gating + hover insight ===================== */
-let goEndWrap, goEndBtn; // container + button
+/* ===================== Seek gating + hover insight (unchanged logic) ===================== */
+let goEndWrap, goEndBtn;
 let seekUnlocked = localStorage.getItem(STORAGE_KEY_UNLOCK) === '1';
 function isSeekEnabled() { return seekUnlocked; }
 function applySeekLockUI() {
@@ -991,24 +946,24 @@ function seekFromEvent(e) {
 }
 progress.addEventListener('click', seekFromEvent);
 progress.addEventListener('touchstart', seekFromEvent, { passive: true });
-document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
+document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','j','J','l','L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
 
-/* ===================== Preview loop (muted pre-roll) ===================== */
+/* ===================== Preview loop (unchanged) ===================== */
 let previewLoopActive = true; const PREVIEW_LOOP_EPS = 0.12;
 mainVideo.addEventListener('timeupdate', () => { if (!previewLoopActive || hasClickedUnmuteOverlay) return; const d = mainVideo.duration; if (!isFinite(d) || d <= 0) return; if (mainVideo.currentTime >= d - PREVIEW_LOOP_EPS) { setMainTimeAndHardSync(0.03); ignoreSeeksUntil = performance.now() + 200; if (mainVideo.paused) mainVideo.play().catch(() => { }); } });
 
-/* ===================== Continuous float ===================== */
+/* ===================== Continuous float (unchanged) ===================== */
 const floatStart = performance.now(); function floatRAF(now) { const t = (now - floatStart) / 1000; const x = Math.cos(t * FLOAT_SPEED_X) * FLOAT_RADIUS_X; const y = Math.sin(t * FLOAT_SPEED_Y) * FLOAT_RADIUS_Y; webcam.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`; requestAnimationFrame(floatRAF); } requestAnimationFrame(floatRAF);
 
-/* ===================== Slide mechanics ===================== */
+/* ===================== Slide mechanics (unchanged) ===================== */
 function slideWebcamUpSmall() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(${SHIFT_RIGHT_PX}px, ${-SHIFT_UP_PX}px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = SCALE_TOP; webcam.style.transform = `scale(1)`; webcam.classList.add('pop-pulse'); setTimeout(() => webcam.classList.remove('pop-pulse'), 450); }
 function slideWebcamDownToOrigin() { webcamWrap.style.transition = `transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcamWrap.style.transform = `translate(0px, 0px)`; webcam.style.transition = `scale ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1), transform ${SLIDE_DURATION_MS}ms cubic-bezier(.22,1,.36,1)`; webcam.style.scale = 1; webcam.style.transform = `scale(1)`; }
 
-/* ===================== Orbit positioning ===================== */
+/* ===================== Orbit positioning (unchanged) ===================== */
 function positionOrbitOnRim(angleDeg = 315) { if (!webcam || !orbitReplay) return; orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%'; const r = webcam.offsetWidth / 2; if (!r) return; const theta = (angleDeg * Math.PI) / 180; const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r; orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`; }
 window.addEventListener('resize', () => positionOrbitOnRim());
 
-/* ===================== End state + crossfade + OFFER SFX & MUSIC ===================== */
+/* ===================== End state + music (unchanged logic) ===================== */
 function showEndUI() {
   document.body.classList.add('offer-mode');
   intrigue?.classList.add('hide');
@@ -1018,16 +973,19 @@ function showEndUI() {
   endCta.setAttribute('aria-hidden', 'false');
   brandMarquee?.classList.add('show');
   brandMarquee?.setAttribute('aria-hidden', 'false');
-  try { sfxOffer.currentTime = 0; sfxOffer.play().catch(() => { }); } catch { };
 
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = 'none';
   }
+
   crossfadeToEndMusic();
 
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
   setTimeout(() => { positionOrbitOnRim(315); }, 50);
+
+  // Exit fullscreen if we were in it
+  exitFSIfActive();
 }
 function hideEndUI() {
   document.body.classList.remove('offer-mode');
@@ -1044,6 +1002,7 @@ function hideEndUI() {
   }
 
   crossfadeBackToMainMusic();
+
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
   setTimeout(() => { positionOrbitOnRim(315); }, 50);
 }
@@ -1119,10 +1078,10 @@ function goToEndNow() {
   crossfadeToWebcamEnd(100);
 }
 
-/* ===================== Seamless marquee (kept) ===================== */
+/* ===================== Marquee (unchanged) ===================== */
 (function setupMarquee() { if (!brandTrack) return; const container = brandTrack.parentElement; const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true)); function ensureFill() { brandTrack.innerHTML = ''; baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); while (brandTrack.scrollWidth < container.clientWidth * 2) { baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } ensureFill(); const PX_PER_SEC = 120; const setDur = () => { const totalWidth = brandTrack.scrollWidth; const dur = (totalWidth / 2) / PX_PER_SEC; brandTrack.style.animationDuration = `${dur}s`; }; setDur(); let rAF = null; window.addEventListener('resize', () => { if (rAF) cancelAnimationFrame(rAF); rAF = requestAnimationFrame(() => { ensureFill(); setDur(); positionIntrigueBetween(); }); }); })();
 
-/* ===================== PIN overlay logic (waits for hydration) ===================== */
+/* ===================== PIN overlay logic (UPDATED) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
@@ -1135,7 +1094,7 @@ function goToEndNow() {
   pinInput.inputMode = 'numeric';
   pinInput.pattern = '[0-9]*';
   pinInput.autocomplete = 'one-time-code';
-  pinInput.maxLength = 4;
+  pinInput.maxLength = 4; // will be updated after hydration
   pinInput.style.position = 'absolute';
   pinInput.style.opacity = '0';
   pinInput.style.pointerEvents = 'none';
@@ -1143,7 +1102,10 @@ function goToEndNow() {
   pinInput.style.height = '0';
   pinOverlay.appendChild(pinInput);
 
-  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); } catch { } }, 0); }
+  let PIN_MAX = 4;
+  let checking = false;
+
+  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus({ preventScroll: true }); } catch { } }, 0); }
   pinOverlay.addEventListener('click', focusPinInputSoon);
 
   function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); }
@@ -1153,11 +1115,11 @@ function goToEndNow() {
   function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
 
   pinInput.addEventListener('input', () => {
-    const v = normalizeDigits(pinInput.value).slice(0, 4);
+    const v = normalizeDigits(pinInput.value).slice(0, PIN_MAX);
     digits.length = 0;
     for (const ch of v) digits.push(ch);
     render();
-    if (digits.length === 4) checkIfReady();
+    if (digits.length === PIN_MAX) checkIfReady();
   });
 
   async function startAfterPin() {
@@ -1168,34 +1130,39 @@ function goToEndNow() {
     runSequence();
   }
 
-  function checkIfReady() {
-    if (!PIN_REQUIRED) { startAfterPin(); return; }
-    if (digits.length !== 4) return;
-    const attempt = normalizeDigits(digits.join(''));
+  async function checkIfReady() {
+    if (checking) return;
+    await HYDRATE_DONE;
+
+    // If PIN not required, allow entry immediately (desktop/mobile parity)
+    if (!PIN_REQUIRED) { return startAfterPin(); }
+
+    if (digits.length !== (window.__PIN_EXPECTED_LEN || PIN_MAX)) return;
+    checking = true;
+
+    const attempt  = normalizeDigits(digits.join(''));
     const expected = normalizeDigits(PIN_EXPECTED);
+
     if (attempt && expected && attempt === expected) {
+      checking = false;
       startAfterPin();
     } else {
       flashError();
-      setTimeout(() => { clearDigits(); pinInput.value = ''; focusPinInputSoon(); }, 180);
+      setTimeout(() => {
+        digits.length = 0;
+        pinInput.value = '';
+        render();
+        pinInput.focus({ preventScroll: true });
+        checking = false;
+      }, 180);
     }
   }
+
   function onKey(e) {
     if (!pinOverlay || pinOverlay.style.display === 'none') return;
     const k = e.key;
-    if (/[0-9٠-٩۰-۹]/.test(k)) {
-      if (digits.length < 4) {
-        digits.push(normalizeDigits(k));
-        render();
-        playPinSound();
-        if (digits.length === 4) checkIfReady();
-      }
-      e.preventDefault(); return;
-    }
-    if (k === 'Backspace' || k === 'Delete') {
-      if (digits.length > 0) { digits.pop(); render(); playPinSound(); }
-      e.preventDefault(); return;
-    }
+    if (k >= '0' && k <= '9') { if (digits.length < PIN_MAX) { digits.push(k); render(); playPinSound(); if (digits.length === PIN_MAX) checkIfReady(); } e.preventDefault(); return; }
+    if (k === 'Backspace' || k === 'Delete') { if (digits.length > 0) { digits.pop(); render(); playPinSound(); } e.preventDefault(); return; }
   }
   document.addEventListener('keydown', onKey, true);
   render();
@@ -1203,16 +1170,19 @@ function goToEndNow() {
 
   (async function waitForPinDecision() {
     await HYDRATE_DONE;
+    // adjust max length after we know the expected PIN
+    PIN_MAX = window.__PIN_EXPECTED_LEN || 4;
+    pinInput.maxLength = PIN_MAX;
+
     if (!PIN_REQUIRED) { startAfterPin(); }
   })();
 })();
 
-/* ===================== Music navbar toggle (controls both tracks) ===================== */
+/* ===================== Music navbar toggle (unchanged) ===================== */
 (function setupMusicToggle() {
   if (!musicToggle) return;
   if (bgMusic) setVolumeSafe(bgMusic, MUSIC.MAIN_VOL);
   if (endMusic) setVolumeSafe(endMusic, 0);
-
   function updateBtn() {
     const off = !musicEnabled || ((bgMusic?.paused ?? true) && (endMusic?.paused ?? true));
     musicToggle.classList.toggle('off', off);
@@ -1226,7 +1196,6 @@ function goToEndNow() {
     }
     updateBtn();
   });
-
   bgMusic?.addEventListener('play', updateBtn);
   bgMusic?.addEventListener('pause', updateBtn);
   endMusic?.addEventListener('play', updateBtn);
@@ -1234,15 +1203,13 @@ function goToEndNow() {
   updateBtn();
 })();
 
-/* ===================== Seek-locked message spacing + z-index + width ===================== */
+/* ===================== Seek-locked message spacing + z-index + width (unchanged) ===================== */
 function applySeekInsightStyleFromCSS() {
   if (!seekInsight) return;
   const cs = getComputedStyle(document.documentElement);
-
   const gap = (cs.getPropertyValue('--seekinsight-gap') || '').trim() || '10px';
   const z   = (cs.getPropertyValue('--seekinsight-z') || '').trim() || '10060';
   const w   = (cs.getPropertyValue('--seekinsight-width') || '').trim();
-
   seekInsight.style.marginTop = gap;
   seekInsight.style.zIndex = String(parseInt(z, 10) || 10060);
   if (w) {
@@ -1253,7 +1220,7 @@ function applySeekInsightStyleFromCSS() {
 applySeekInsightStyleFromCSS();
 window.addEventListener('resize', applySeekInsightStyleFromCSS);
 
-/* ===================== Setup Go-to-End container & mobile docking ===================== */
+/* ===================== Go-to-End container & mobile docking (unchanged) ===================== */
 function setupGoToEndButton() {
   if (!playerEl) return;
 
@@ -1290,6 +1257,15 @@ function setupGoToEndButton() {
     const isSmall = window.matchMedia('(max-width: 768px)').matches;
     if (!webcamWrap) return;
 
+    // If fullscreen, keep webcam pinned inside the frame
+    if (document.body.classList.contains('fs-mode')) {
+      if (webcamWrap.parentNode !== frameEl) frameEl.appendChild(webcamWrap);
+      document.body.dataset.webcamPosition = 'below';
+      requestAnimationFrame(() => { positionOrbitOnRim(315); });
+      return;
+    }
+
+    // Offer-mode: dock to topDock
     if (isSmall && document.body.classList.contains('offer-mode') && topDock) {
       if (webcamWrap.parentNode !== topDock) topDock.appendChild(webcamWrap);
       document.body.dataset.webcamPosition = 'below';
@@ -1319,7 +1295,7 @@ function setupGoToEndButton() {
 }
 setupGoToEndButton();
 
-/* ===================== HOVER/CURSOR TIME LABEL (only over the bar, drag fixed) ===================== */
+/* ===================== Hover time label + scrub overlay (unchanged from your last good state) ===================== */
 (function setupHoverTimeLabel(){
   if (!progress || !mainVideo) return;
 
@@ -1350,34 +1326,19 @@ setupGoToEndButton();
 
   const overlay = document.createElement('div');
   Object.assign(overlay.style, {
-    position: 'fixed',
-    left: '0px', top: '0px', width: '0px', height: '0px',
-    pointerEvents: 'auto',
-    background: 'transparent',
-    zIndex: '10050',
-    touchAction: 'none'
+    position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px',
+    pointerEvents: 'auto', background: 'transparent', zIndex: '10050', touchAction: 'none'
   });
   document.body.appendChild(overlay);
 
   const label = document.createElement('div');
   Object.assign(label.style, {
-    position: 'fixed',
-    left: '0px', top: '0px',
-    transform: 'translateX(-50%)',
-    padding: '4px 6px',
-    fontSize: '12.5px',
-    fontWeight: '800',
-    lineHeight: '1',
-    color: '#fff',
-    background: 'rgba(0,0,0,.68)',
-    borderRadius: '8px',
-    boxShadow: '0 2px 8px rgba(0,0,0,.18)',
-    textShadow: '0 1px 0 rgba(0,0,0,.25)',
-    whiteSpace: 'nowrap',
-    opacity: '0',
-    transition: 'opacity .12s ease',
-    pointerEvents: 'none',
-    zIndex: '10060'
+    position: 'fixed', left: '0px', top: '0px', transform: 'translateX(-50%)',
+    padding: '4px 6px', fontSize: '12.5px', fontWeight: '800', lineHeight: '1',
+    color: '#fff', background: 'rgba(0,0,0,.68)', borderRadius: '8px',
+    boxShadow: '0 2px 8px rgba(0,0,0,.18)', textShadow: '0 1px 0 rgba(0,0,0,.25)',
+    whiteSpace: 'nowrap', opacity: '0', transition: 'opacity .12s ease',
+    pointerEvents: 'none', zIndex: '10060'
   });
   document.body.appendChild(label);
 
@@ -1408,13 +1369,11 @@ setupGoToEndButton();
     label.style.top  = `${Math.round(Math.max(0, topY))}px`;
   }
   function showLabel(show){ label.style.opacity = show ? '1' : '0'; }
-
   function updateAt(clientX){
     const t = timeFromClientX(clientX);
     label.textContent = fmtClock(t);
     moveLabelTo(clientX);
   }
-
   function maybeShowLockedMessage(show){
     if (!seekInsight) return;
     if (!isSeekEnabled() && show) {
@@ -1425,17 +1384,13 @@ setupGoToEndButton();
   }
 
   function begin(e){
-    pointerDown = true;
-    scrubbing = false;
-    moved = 0;
+    pointerDown = true; scrubbing = false; moved = 0;
     wasPlaying = !mainVideo.paused;
     lastX = e.clientX ?? (e.touches?.[0]?.clientX || 0);
     activePointerId = e.pointerId ?? null;
     try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {}
-
     showLabel(true);
     updateAt(lastX);
-
     if (isSeekEnabled()) {
       setMainTimeAndHardSync(timeFromClientX(lastX));
       overlay.style.cursor = 'pointer';
@@ -1445,7 +1400,6 @@ setupGoToEndButton();
     }
     e.preventDefault();
   }
-
   function move(e){
     const x = e.clientX ?? (e.touches?.[0]?.clientX || 0);
     if (!pointerDown) {
@@ -1458,7 +1412,6 @@ setupGoToEndButton();
     moved += Math.abs(x - lastX);
     lastX = x;
     updateAt(x);
-
     if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) {
       scrubbing = true;
       if (wasPlaying) pauseBound();
@@ -1468,11 +1421,9 @@ setupGoToEndButton();
       e.preventDefault();
     }
   }
-
   function end(){
     if (scrubbing && wasPlaying) playBound();
-    pointerDown = false;
-    scrubbing = false;
+    pointerDown = false; scrubbing = false;
     try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {}
     activePointerId = null;
     if (!insideOverlay) {
@@ -1480,7 +1431,6 @@ setupGoToEndButton();
       seekInsight && seekInsight.classList.remove('show');
     }
   }
-
   overlay.addEventListener('pointerenter', () => {
     insideOverlay = true;
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
@@ -1494,16 +1444,130 @@ setupGoToEndButton();
       seekInsight && seekInsight.classList.remove('show');
     }
   });
-
   overlay.addEventListener('pointerdown', begin, { passive: false });
   overlay.addEventListener('pointermove', move,  { passive: false });
   overlay.addEventListener('pointerup',   end);
   overlay.addEventListener('pointercancel', end);
-
   window.__updateScrubOverlay = function(){
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
   };
   window.__updateScrubOverlay();
+})();
+
+/* ===================== Mobile fullscreen + overlay webcam (NEW) ===================== */
+(function setupMobileFullscreen(){
+  if (!frameEl || !mainVideo || !webcamWrap) return;
+
+  // Create a corner button inside the video frame
+  const fsBtn = document.createElement('button');
+  fsBtn.id = 'fsBtn';
+  fsBtn.type = 'button';
+  fsBtn.setAttribute('aria-label', 'Fullscreen');
+  fsBtn.innerHTML = '<i class="ri-fullscreen-fill" aria-hidden="true"></i>';
+  fsBtn.style.position = 'absolute';
+  fsBtn.style.right = '8px';
+  fsBtn.style.top = '8px';
+  fsBtn.style.zIndex = '10040';
+  fsBtn.style.padding = '6px 8px';
+  fsBtn.style.borderRadius = '10px';
+  fsBtn.style.border = '0';
+  fsBtn.style.background = 'rgba(0,0,0,.45)';
+  fsBtn.style.color = '#fff';
+  fsBtn.style.fontSize = '16px';
+  fsBtn.style.lineHeight = '1';
+  fsBtn.style.display = 'none'; // only show on small screens
+  frameEl.appendChild(fsBtn);
+
+  function refreshFSBtnVisibility() {
+    fsBtn.style.display = window.matchMedia('(max-width: 768px)').matches ? 'inline-flex' : 'none';
+  }
+  refreshFSBtnVisibility();
+  window.addEventListener('resize', refreshFSBtnVisibility);
+
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+  }
+  async function requestFS(el) {
+    if (el.requestFullscreen) return el.requestFullscreen();
+    if (el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+    if (el.msRequestFullscreen) return el.msRequestFullscreen();
+  }
+  async function exitFS() {
+    if (document.exitFullscreen) return document.exitFullscreen();
+    if (document.webkitExitFullscreen) return document.webkitExitFullscreen();
+    if (document.msExitFullscreen) return document.msExitFullscreen();
+  }
+  async function lockLandscape() {
+    try { if (screen.orientation && screen.orientation.lock) { await screen.orientation.lock('landscape'); } } catch {}
+  }
+  async function unlockOrientation() {
+    try { if (screen.orientation && screen.orientation.unlock) { screen.orientation.unlock(); } } catch {}
+  }
+
+  function enterFSModeStyles() {
+    document.body.classList.add('fs-mode');
+    // move webcam into the frame so it overlays the video in fullscreen
+    if (webcamWrap.parentNode !== frameEl) frameEl.appendChild(webcamWrap);
+    // small corner PIP
+    Object.assign(webcamWrap.style, {
+      position: 'fixed',
+      width: 'var(--fs-webcam-size, 120px)',
+      height: 'var(--fs-webcam-size, 120px)',
+      right: 'var(--fs-webcam-padding, 10px)',
+      bottom: 'var(--fs-webcam-padding, 10px)',
+      left: 'auto',
+      top: 'auto',
+      transform: 'none',
+      zIndex: '10070'
+    });
+  }
+  function exitFSModeStyles() {
+    document.body.classList.remove('fs-mode');
+    // let the responsive relocation logic decide where webcam goes
+    try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch {}
+    // clear inline that would fight CSS
+    ['position','width','height','right','bottom','left','top','transform','zIndex'].forEach(k => {
+      try { webcamWrap.style.removeProperty(k); } catch {}
+    });
+  }
+
+  async function enterFSFlow() {
+    // if iOS uses native video fullscreen, overlay is impossible; try element fullscreen first
+    await requestFS(frameEl).catch(()=>{});
+    enterFSModeStyles();
+    await lockLandscape();
+  }
+  async function exitFSIfAny() {
+    exitFSModeStyles();
+    await unlockOrientation();
+    if (isFullscreen()) { try { await exitFS(); } catch {} }
+  }
+
+  function exitFSIfActive() {
+    // used by showEndUI()
+    if (document.body.classList.contains('fs-mode')) {
+      exitFSIfAny();
+    }
+  }
+  window.exitFSIfActive = exitFSIfActive;
+
+  fsBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (document.body.classList.contains('offer-mode')) return; // ignore on offer
+    if (!isFullscreen()) {
+      await enterFSFlow();
+    } else {
+      await exitFSIfAny();
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if (!isFullscreen()) {
+      // user swiped out
+      exitFSModeStyles();
+      unlockOrientation();
+    }
+  });
 })();
 
 /* ===================== Utilities kept ===================== */

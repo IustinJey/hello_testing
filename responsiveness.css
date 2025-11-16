@@ -1,7 +1,8 @@
 /* ====================================================================
-   RESPONSIVENESS — flexible knobs with your proven working defaults
+   RESPONSIVENESS — flexible knobs (mobile spacing + seek tooltip)
    ==================================================================== */
 
+/* Hidden by default; app.js creates and inserts this just under .nav/.stage */
 #topDock { display: none; }
 
 /* ------------------------------
@@ -9,13 +10,13 @@
    ------------------------------ */
 :root {
   /* Layout constants */
-  --nav-height: 64px;
+  --nav-height: 64px;                 /* base navbar height from style.css */
 
   /* Mobile — OFFER (end screen) defaults */
-  --offer-stage-top-padding-mobile: 76px;   /* ≈ 64 nav + 12 spacing */
-  --topdock-margin-top: 50px;               /* space under nav/timer → webcam */
-  --topdock-margin-bottom: 50px;            /* space under webcam → offer */
-  --topdock-padding-x: 12px;                /* L/R padding inside dock */
+  --offer-stage-top-padding-mobile: 76px;  /* = fixed nav + breathing */
+  --topdock-margin-top: 50px;              /* space under nav/timer → webcam */
+  --topdock-margin-bottom: 50px;           /* space under webcam → offer */
+  --topdock-padding-x: 12px;               /* left/right padding inside dock */
 
   /* Docked (end) webcam size — clamp(min, vw, max) */
   --webcam-offer-min: 150px;
@@ -23,9 +24,9 @@
   --webcam-offer-max: 220px;
 
   /* Mobile — NORMAL playback (pre-offer) */
-  --goend-gap-mobile: 40px;                 /* gap between button and webcam */
+  --goend-gap-mobile: 40px;               /* gap between button and webcam */
 
-  /* Pre-offer webcam size */
+  /* Pre-offer webcam size — clamp(min, vw, max) */
   --webcam-preoffer-min: 240px;
   --webcam-preoffer-vw: 44vw;
   --webcam-preoffer-max: 260px;
@@ -35,44 +36,32 @@
   --endcta-max-w-px: 960px;
   --endcta-max-w-vw: 94vw;
 
-  /* Typography */
+  /* Seek-locked message controls */
+  --seekinsight-gap: 8px;                 /* distance between tooltip and bar */
+  --seekinsight-z: 10060;                 /* above everything else */
+  --seekinsight-width: 320px;             /* max width (override as you wish) */
+
+  /* Floating hover time label offset */
+  --seeklabel-gap: 8px;
+
+  /* Distance between (mobile) webcam bubble and timeline below it */
+  --webcam-timeline-gap: 12px;            /* tweakable — if it seems ignored, see note below */
+
+  /* Optional: typography knobs */
   --font-intrigue: clamp(22px, 3.6vw, 25px);
   --font-goend: 14px;
   --font-progress-time: 11px;
-
-  /* ================= Mobile tunables ================= */
-  /* Distance between seek-locked message and the bar */
-  --seekinsight-gap: 8px;
-  /* Always on top; bump higher if navbar sets own stacking context */
-  --seekinsight-z: 10060;
-  /* Let me control message width if I want (optional) */
-  --seekinsight-width: 320px; /* e.g., min(92vw, 360px) */
-
-  /* Distance between floating time label and the bar */
-  --seeklabel-gap: 8px;
-
-  /* Distance between (mobile-docked) webcam and the progress/timeline below it */
-  --webcam-timeline-gap: 12px;
-
-  /* Mobile fullscreen PIP webcam */
-  --fs-webcam-size: 120px;
-  --fs-webcam-padding: 10px;
 }
 
-/* Desktop defaults you had */
-:root {
-  --intrigue-gap-top: -200px;
-  --intrigue-gap-bottom: -200px;
-}
+/* Desktop defaults */
+:root { --intrigue-gap-top: -200px; --intrigue-gap-bottom: -200px; }
 
-/* Mobile overrides (optional) */
+/* Mobile overrides */
 @media (max-width: 768px) {
-  :root {
-    --intrigue-gap-top: 14px;
-    --intrigue-gap-bottom: 12px;
-  }
+  :root { --intrigue-gap-top: 14px; --intrigue-gap-bottom: 12px; }
 }
 
+/* Keep typography easy to tune */
 .intrigue h3 { font-size: var(--font-intrigue); }
 .go-end-btn { font-size: var(--font-goend); }
 .progress__time { font-size: var(--font-progress-time); }
@@ -101,12 +90,13 @@
     right: auto !important;
     bottom: auto !important;
     transform: none !important;
-    z-index: 1 !important; /* stays under fixed navbar */
+    z-index: 1 !important; /* always under the fixed navbar */
     width: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
     height: clamp(var(--webcam-offer-min), var(--webcam-offer-vw), var(--webcam-offer-max));
-    margin: 0 auto;
+    margin: 0 auto; /* centered in the dock */
   }
 
+  /* End CTA block positioning */
   body.offer-mode .player.content-hidden .end-cta {
     position: static !important;
     inset: auto !important;
@@ -117,13 +107,8 @@
     max-width: min(var(--endcta-max-w-px), var(--endcta-max-w-vw));
   }
 
-  /* ===== Normal playback ===== */
-  .go-end-wrap {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--goend-gap-mobile);
-  }
+  /* ===== Normal playback (no offer) ===== */
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
 
   .go-end-wrap .webcam-wrap {
     position: static !important;
@@ -135,41 +120,40 @@
     margin: 0 auto 0;
   }
 
-  /* Distance between webcam (when docked below) and timeline */
-  body[data-webcam-position="below"] #webcamWrap {
-    margin-bottom: var(--webcam-timeline-gap);
-  }
+  /* Ensure pin overlay truly centers on iOS (100dvh for keyboard-safe height) */
+  #pinOverlay { position: fixed; inset: 0; display: grid; place-items: center; height: 100dvh; }
+}
 
-  /* Navbar timer compact */
+/* Tablet safety */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .go-end-wrap { display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile); }
+}
+
+/* Timer pill adjustments on mobile */
+@media (max-width: 768px) {
   .nav .timer > span:not(.dot-red) { display: none; }
   .nav .timer { padding: 6px 10px; gap: 8px; font-size: 13px; }
+}
 
-  /* Softer blobs */
+/* Background blobs softening on mobile (optional) */
+@media (max-width: 768px) {
   .blob { opacity: .70; filter: blur(90px) saturate(.85); }
   .b3 { display: none; }
   .b1 { width: 560px; height: 560px; left: -150px; top: -120px; }
   .b2 { width: 640px; height: 640px; right: -200px; bottom: -140px; }
 }
 
-/* Tablets */
-@media (min-width: 769px) and (max-width: 1024px) {
-  .go-end-wrap {
-    display: flex; flex-direction: column; align-items: center; gap: var(--goend-gap-mobile);
-  }
-}
-
-/* Seek insight pill — driven by vars from :root via JS */
+/* ================= Mobile tunables ================= */
 :root {
-  /* already defined: --seekinsight-gap, --seekinsight-z, --seekinsight-width */
+  /* Distance between seek-locked message and the bar */
+  --seekinsight-gap: 8px;
+  --seekinsight-z: 10060;
+  --seekinsight-width: 320px; /* or: min(92vw, 360px) */
+  --seeklabel-gap: 8px;
+  --webcam-timeline-gap: 12px; /* used when webcam is docked below */
 }
 
-/* Fullscreen mode styles (activated by JS with body.fs-mode) */
-@media (max-width: 1024px) {
-  body.fs-mode {
-    /* Let player take over; your base styles handle sizing */
-  }
-  /* FS button sits on the frame; webcam styling is pushed inline by JS for reliability */
+@media (max-width: 768px) {
+  /* When the webcam is docked below the player area, push timeline down */
+  body[data-webcam-position="below"] #webcamWrap { margin-bottom: var(--webcam-timeline-gap); }
 }
-
-/* Optional: ensure seek insight floats above any nav on mobile */
-#seekInsight { z-index: var(--seekinsight-z) !important; max-width: var(--seekinsight-width); }

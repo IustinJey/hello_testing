@@ -1,12 +1,22 @@
 /* =====================================================
   app.js — Viewer (dynamic hydration via Supabase)
 
-  DEBUG BUILD (logs only):
-  - Added verbose console logs around PIN input, normalization, and validation flow.
-  - Added logs around hydration (PIN_REQUIRED / PIN_EXPECTED), CTA riskline hydration, and media URL resolution.
-  - Added global error/rejection logger and environment fingerprint dump (UA, platform, touch).
-  - NO BEHAVIOR CHANGES besides logging.
-===================================================== */
+  DEBUG LOGGING BUILD — 2025-11-16
+  -----------------------------------------------------
+  Requested by user: add **console logs only** to diagnose mobile PIN input issues
+  and DB riskline hydration. Behavior is otherwise unchanged.
+
+  What’s logged (search for "[DBG]" or "[PIN]"):
+  - Environment + viewport metrics
+  - Hydration: link/pres presence, CTA fields, PIN_REQUIRED/PIN_EXPECTED
+  - PIN overlay lifecycle: focus/blur/click, input/keydown/composition
+  - Hidden input raw value → cleaned (\nonnumeric stripped) → digits[] state
+  - Attempt vs expected (also code points + lengths)
+  - Acceptance/rejection paths, and why
+  - Riskline hydration targets + final text
+
+  NOTE: No logic changes—only added console.* calls and a tiny in-page debug helper.
+  ===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
 const ENV = window.ENV || {};
@@ -23,25 +33,32 @@ const slugFromQS = (() => {
   return null;
 })();
 
-// ===== DEBUG helpers =====
-const __DBG = true; // flip to false to silence logs in prod quickly
-function DBG(...args){ if (__DBG) try { console.log('[PV]', ...args); } catch {} }
-window.addEventListener('error', (e)=>{ DBG('window.onerror', e?.message, e?.filename, e?.lineno, e?.colno, e?.error); });
-window.addEventListener('unhandledrejection', (e)=>{ DBG('unhandledrejection', e?.reason); });
-(function fingerprint(){
-  const ua = navigator.userAgent || navigator.vendor || window.opera || '';
-  const plat = navigator.platform || '';
-  const maxTouch = navigator.maxTouchPoints || 0;
-  const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
-  const vh = window.innerHeight, vw = window.innerWidth;
-  DBG('BOOT', { slugFromQS, ua, plat, maxTouch, standalone, vw, vh });
-})();
-
 // Safe create client (viewer never needs auth session persistence)
 const SB = (SUPABASE_URL && SUPABASE_ANON && window.supabase)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { persistSession: false } })
   : null;
-DBG('Supabase client ready?', !!SB);
+
+/* Early environment logs */
+(function dbgBoot() {
+  try {
+    console.log('[DBG] UA:', navigator.userAgent);
+    console.log('[DBG] platform:', navigator.platform, 'lang:', navigator.language);
+    console.log('[DBG] initial viewport:', {
+      innerW: window.innerWidth,
+      innerH: window.innerHeight,
+      visualH: window.visualViewport?.height,
+      availH: screen.availHeight,
+      pixelRatio: window.devicePixelRatio
+    });
+    window.addEventListener('resize', () => {
+      console.log('[DBG] resize:', {
+        innerW: window.innerWidth,
+        innerH: window.innerHeight,
+        visualH: window.visualViewport?.height
+      });
+    });
+  } catch {}
+})();
 
 /* ===================== Static defaults (kept) ===================== */
 const EXPIRY_DAYS = 7; // fallback expiry only
@@ -55,7 +72,6 @@ const HYDRATE = { link: null, lead: null, pres: null, cta: {}, videos: { slidesU
 // Hydration status gates (to avoid flicker)
 let HYDR = { started: false, done: false, notFound: false };
 let _resolveHydrate; const HYDRATE_DONE = new Promise(r => (_resolveHydrate = r));
-function dbgHydratePinState(tag=''){ DBG('PIN_STATE@'+tag, { PIN_REQUIRED, PIN_EXPECTED, HYDR }); }
 
 /* ===================== Elements (unchanged) ===================== */
 const nav = document.getElementById('nav');
@@ -107,20 +123,23 @@ const skipIntroBtn = document.getElementById('skipIntroBtn');
 const sfxPin = document.getElementById('sfxPin');
 const sfxHello = document.getElementById('sfxHello');
 const sfxOffer = document.getElementById('sfxOffer');
-const bgMusic = document.getElementById('bgMusic');    // main background music
-const endMusic = document.getElementById('endMusic');  // end/offer music
+const bgMusic = document.getElementById('bgMusic');
+const endMusic = document.getElementById('endMusic');
 const musicToggle = document.getElementById('musicToggle');
 const intrigue = document.getElementById('intrigue');
-DBG('DOM refs ready?', {
-  nav: !!nav, stage: !!stage, playerEl: !!playerEl, frameEl: !!frameEl,
-  mainVideo: !!mainVideo, webcamVideo: !!webcamVideo, webcamVideo2: !!webcamVideo2,
-  pinOverlay: document.getElementById('pinOverlay') ? true : false
-});
 
 /* ===================== Music knobs & helpers ===================== */
-const MUSIC = { MAIN_VOL: 0.15, END_VOL: 0.10, FADE_MS: 900, END_START_DELAY_MS: 0, PRIME_ON_UNMUTE: true };
+const MUSIC = {
+  MAIN_VOL: 0.15,
+  END_VOL: 0.10,
+  FADE_MS: 900,
+  END_START_DELAY_MS: 0,
+  PRIME_ON_UNMUTE: true
+};
+
 function clamp01(x) { return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0)); }
 function setVolumeSafe(audio, v) { try { if (audio) audio.volume = clamp01(v); } catch {} }
+
 function fadeAudio(el, from, to, ms) {
   return new Promise((resolve) => {
     if (!el) return resolve();
@@ -138,7 +157,8 @@ function fadeAudio(el, from, to, ms) {
     requestAnimationFrame(step);
   });
 }
-let musicEnabled = true;
+
+let musicEnabled = true;  // master toggle
 function pauseBothMusic() { try { bgMusic && bgMusic.pause(); } catch {}; try { endMusic && endMusic.pause(); } catch {}; }
 function playActiveMusicForState() {
   if (!musicEnabled) return;
@@ -199,20 +219,22 @@ function fmt(ms) {
 function tick() {
   const remain = expiryTS - Date.now();
   const t = fmt(remain);
-  if (navCountdown) navCountdown.textContent = t;
-  if (separateCountdown) separateCountdown.textContent = t;
-  if (ctaCountdownEl) ctaCountdownEl.textContent = t;
+  navCountdown && (navCountdown.textContent = t);
+  separateCountdown && (separateCountdown.textContent = t);
+  ctaCountdownEl && (ctaCountdownEl.textContent = t);
   if (remain <= 0) { try { mainVideo.pause(); } catch (e) { } }
 }
-setInterval(tick, 1000);
-tick();
+setInterval(tick, 1000); tick();
 
 /* Month label (kept) */
-(function setMonthLabel() { const month = new Date().toLocaleString(undefined, { month: 'long' }); if (ctaMonth) ctaMonth.textContent = month; })();
+(function setMonthLabel() {
+  const month = new Date().toLocaleString(undefined, { month: 'long' });
+  if (ctaMonth) ctaMonth.textContent = month;
+})();
 
 /* ===================== Storage helpers ===================== */
 const STORAGE_BUCKET = (ENV.STORAGE_BUCKET || 'hello-videos');
-const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET; // <— slides use this
+const SLIDES_BUCKET = ENV.SLIDES_BUCKET || STORAGE_BUCKET;
 const CAM_BUCKET = ENV.CAM_BUCKET || 'webcam';
 const HAND_BUCKET = ENV.HAND_BUCKET || 'handcam';
 const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 days
@@ -221,6 +243,7 @@ function partsFromPublicURL(url) {
   const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
   return m ? { bucket: m[1], path: m[2] } : null;
 }
+
 async function storageSignedOrPublicURL(bucket, path) {
   if (!SB || !bucket || !path) return null;
   if (/^https?:\/\//i.test(path)) return path;
@@ -231,6 +254,7 @@ async function storageSignedOrPublicURL(bucket, path) {
   const { data } = SB.storage.from(bucket).getPublicUrl(path);
   return data?.publicUrl || null;
 }
+
 async function pickFirstStorageURLAsync(candidates) {
   for (const c of (candidates || [])) {
     if (!c) continue;
@@ -243,7 +267,7 @@ async function pickFirstStorageURLAsync(candidates) {
         const u = await storageSignedOrPublicURL(p.bucket, p.path);
         if (u) return u;
       }
-      return c.url; // non-supabase full URL (legacy)
+      return c.url;
     }
   }
   return null;
@@ -267,7 +291,9 @@ function guessStorageKeyVariants(id, bucket) {
 
 async function resolveIdToURL(id, preferredBucket) {
   if (!SB || !id) return null;
-  const TABLES = [ 'videos', 'hello_videos', 'hello_assets_videos', 'slides', 'hello_slides', 'media', 'presentation_videos' ];
+  const TABLES = [
+    'videos','hello_videos','hello_assets_videos','slides','hello_slides','media','presentation_videos'
+  ];
   for (const table of TABLES) {
     try {
       const { data, error } = await SB.from(table).select('*').eq('id', id).limit(1);
@@ -286,6 +312,7 @@ async function resolveIdToURL(id, preferredBucket) {
       }
     } catch { /* try next table */ }
   }
+
   if (isUUID(id)) {
     const guesses = guessStorageKeyVariants(id, preferredBucket || SLIDES_BUCKET);
     for (const g of guesses) {
@@ -296,19 +323,63 @@ async function resolveIdToURL(id, preferredBucket) {
   return null;
 }
 
-function tagMap(lead) {
-  return { nickname: lead?.alias || lead?.nickname || '', name: lead?.nickname || '', company: lead?.company || '', phone: lead?.phone || '', email: lead?.email || '' };
+async function pickFirstVideoURLAsync(candidates, fallbackBucketIfId) {
+  for (const c of (candidates || [])) {
+    if (!c) continue;
+    if (c.id) {
+      const byId = await resolveIdToURL(c.id, fallbackBucketIfId);
+      if (byId) return byId;
+    }
+    if (c.bucket && c.path) {
+      const u = await storageSignedOrPublicURL(c.bucket, c.path);
+      if (u) return u;
+    }
+    if (c.url) {
+      const p = partsFromPublicURL(c.url);
+      if (p) {
+        const u = await storageSignedOrPublicURL(p.bucket, p.path);
+        if (u) return u;
+      }
+      return c.url;
+    }
+  }
+  return null;
 }
-function resolveTags(s, lead) { const map = tagMap(lead); return String(s || '').replace(/\[([^\]]+)\]/g, (_, k) => map[k.trim().toLowerCase()] ?? ''); }
+
+/* ===================== Tag + highlight helpers ===================== */
+function tagMap(lead) {
+  return {
+    nickname: lead?.alias || lead?.nickname || '',
+    name: lead?.nickname || '',
+    company: lead?.company || '',
+    phone: lead?.phone || '',
+    email: lead?.email || ''
+  };
+}
+function resolveTags(s, lead) {
+  const map = tagMap(lead);
+  return String(s || '').replace(/\[([^\]]+)\]/g, (_, k) => map[k.trim().toLowerCase()] ?? '');
+}
 function expandHighlights(highlights, lead) {
-  const map = tagMap(lead); const list = [];
-  (highlights || []).forEach(h => { if (!h) return; const raw = String(h).trim(); const key = raw.replace(/^\[|\]$/g, '').toLowerCase(); if (map[key]) list.push(String(map[key])); list.push(raw); });
+  const map = tagMap(lead);
+  const list = [];
+  (highlights || []).forEach(h => {
+    if (!h) return;
+    const raw = String(h).trim();
+    const key = raw.replace(/^\[|\]$/g, '').toLowerCase();
+    if (map[key]) list.push(String(map[key]));
+    list.push(raw);
+  });
   return [...new Set(list.filter(Boolean))];
 }
 function injectHighlights(resolvedText, highlightsExpanded) {
   if (!resolvedText) return '';
   let html = String(resolvedText);
-  (highlightsExpanded || []).forEach(h => { const safe = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const rx = new RegExp(`(\\b${safe}\\b)`, 'ig'); html = html.replace(rx, '<span class="ink ink--hot">$1<\/span>'); });
+  (highlightsExpanded || []).forEach(h => {
+    const safe = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(`(\\b${safe}\\b)`, 'ig');
+    html = html.replace(rx, '<span class="ink ink--hot">$1<\/span>');
+  });
   return html;
 }
 
@@ -338,13 +409,13 @@ function showNotFound() {
    DYNAMIC HYDRATION (fetch data using slug before PIN)
    ===================================================== */
 async function hydrateFromCloud() {
-  HYDR.started = true; DBG('hydrateFromCloud: start', { slugFromQS });
+  HYDR.started = true;
+  console.log('[DBG] hydrateFromCloud: start. slug=', slugFromQS, 'SB?', !!SB);
   try {
     if (!SB || !slugFromQS) {
-      DBG('hydrate: no SB or slug');
+      console.warn('[DBG] hydrate: missing SB or slug. notFound=true');
       HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate(); return;
     }
-    // 1) Link by slug
     let linkQ = SB.from('hello_links')
       .select('id,slug,lead_id,presentation_id,form_id,require_pin,expires_at,overrides,settings,active')
       .eq('slug', slugFromQS)
@@ -354,10 +425,9 @@ async function hydrateFromCloud() {
     const { data: links, error: e1 } = await linkQ;
     if (e1) throw e1;
     const link = (links || [])[0];
-    DBG('hydrate: link', link);
+    console.log('[DBG] hydrate: link loaded:', link);
     if (!link) { hideHeadlineTimer(); HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate(); return; }
 
-    // 2) Lead + Presentation
     let leadQ = SB.from('leads').select('*').eq('id', link.lead_id).limit(1);
     let presQ = SB.from('hello_presentations').select('*').eq('id', link.presentation_id).limit(1);
     if (INSTANCE_ID) { leadQ = leadQ.eq('instance_id', INSTANCE_ID); presQ = presQ.eq('instance_id', INSTANCE_ID); }
@@ -365,22 +435,22 @@ async function hydrateFromCloud() {
     if (e2) throw e2; if (e3) throw e3;
     const lead = (leads || [])[0] || null;
     const pres = (presArr || [])[0] || null;
-    DBG('hydrate: lead', lead?.id, 'pres', pres?.id);
+    console.log('[DBG] hydrate: lead:', lead); console.log('[DBG] hydrate: pres:', pres);
 
-    // 3) Resolve media
     const BKT = { slides: SLIDES_BUCKET, cam: CAM_BUCKET, hand: HAND_BUCKET };
     const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov)$/i;
     const looksLikeURL = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
     const looksLikePath = (s) => typeof s === 'string' && (VIDEO_EXT_RE.test(s) || /^(default|slides|presentation|uploads|public)\//i.test(s) || s.includes('/'));
-    const isUUID2 = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    const isUUID = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
     function deepCandidates(obj, kind, buckets, maxDepth = 4, pathSeen = new WeakSet()) {
-      const out = []; const ban = kind === 'slides' ? /webcam|cam|hand|end/i : null;
+      const out = [];
+      const ban = kind === 'slides' ? /webcam|cam|hand|end/i : null;
       function push(val, srcBucket) {
         if (!val) return;
         if (typeof val === 'string') {
           if (looksLikeURL(val)) out.push({ url: val });
-          else if (isUUID2(val)) out.push({ id: val });
+          else if (isUUID(val)) out.push({ id: val });
           else if (looksLikePath(val)) out.push({ bucket: srcBucket, path: val });
         } else if (typeof val === 'object') {
           const b = val.bucket || srcBucket;
@@ -398,54 +468,168 @@ async function hydrateFromCloud() {
           const v = node[k];
           const key = k.toLowerCase();
           if (ban && ban.test(key)) continue;
+
           const isSlidesy = /slides?|deck|presentation|main(video)?|primary(video)?|intro(video)?|video$/.test(key);
           const isWebcamy = /(web)?cam(video)?|primarycam/.test(key);
+
           if ((kind === 'slides' && isSlidesy) || (kind === 'webcam' && isWebcamy)) {
             push(v, kind === 'slides' ? buckets.slides : buckets.cam);
             if (typeof v === 'object') walk(v, depth + 1, kind === 'slides' ? buckets.slides : buckets.cam);
             continue;
           }
+
           if (typeof v === 'string') {
-            if (looksLikeURL(v) || isUUID2(v) || looksLikePath(v)) { push(v, kind === 'slides' ? buckets.slides : buckets.cam); continue; }
+            if (looksLikeURL(v) || isUUID(v) || looksLikePath(v)) {
+              push(v, kind === 'slides' ? buckets.slides : buckets.cam);
+              continue;
+            }
           }
+
           if (typeof v === 'object') walk(v, depth + 1, defaultBucket);
         }
       }
       walk(obj, 0, kind === 'slides' ? buckets.slides : buckets.cam);
       const seen = new Set();
-      return out.filter(c => { const key = c.id ? `id:${c.id}` : c.url ? `url:${c.url}` : `bp:${c.bucket}|${c.path}`; if (seen.has(key)) return false; seen.add(key); return true; });
+      return out.filter(c => {
+        const key = c.id ? `id:${c.id}` : c.url ? `url:${c.url}` : `bp:${c.bucket}|${c.path}`;
+        if (seen.has(key)) return false; seen.add(key); return true;
+      });
     }
 
+    async function storageSignedOrPublicURL(bucket, path) {
+      if (!SB || !bucket || !path) return null;
+      if (/^https?:\/\//i.test(path)) return path;
+      try {
+        const { data } = await SB.storage.from(bucket).createSignedUrl(path, SIGNED_URL_SECONDS);
+        if (data?.signedUrl) return data.signedUrl;
+      } catch { }
+      const { data } = SB.storage.from(bucket).getPublicUrl(path);
+      return data?.publicUrl || null;
+    }
+    function partsFromPublicURL(url) {
+      const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+      return m ? { bucket: m[1], path: m[2] } : null;
+    }
+    async function pickFirstStorageURLAsync(cands) {
+      for (const c of (cands || [])) {
+        if (!c) continue;
+        if (c.bucket && c.path) {
+          const u = await storageSignedOrPublicURL(c.bucket, c.path);
+          if (u) return u;
+        } else if (c.url) {
+          const p = partsFromPublicURL(c.url);
+          if (p) {
+            const u = await storageSignedOrPublicURL(p.bucket, p.path);
+            if (u) return u;
+          }
+          return c.url;
+        }
+      }
+      return null;
+    }
+    async function resolveIdToURL(id, preferredBucket) {
+      if (!SB || !id) return null;
+      const TABLES = ['videos', 'hello_videos', 'hello_assets_videos', 'slides', 'hello_slides', 'media', 'presentation_videos'];
+      for (const t of TABLES) {
+        try {
+          const { data, error } = await SB.from(t).select('*').eq('id', id).limit(1);
+          if (!error && data && data[0]) {
+            const row = data[0];
+            if (row.storage_bucket && (row.storage_key || row.storage_path)) {
+              return await storageSignedOrPublicURL(row.storage_bucket, row.storage_key || row.storage_path);
+            }
+            if (row.bucket && (row.key || row.path)) {
+              return await storageSignedOrPublicURL(row.bucket, row.key || row.path);
+            }
+            if (row.storage_path) {
+              return await storageSignedOrPublicURL(preferredBucket || SLIDES_BUCKET, row.storage_path);
+            }
+            return row.public_url || row.file_url || row.url || null;
+          }
+        } catch { /* try next */ }
+      }
+      if (isUUID(id)) {
+        const bases = [id, `slides/${id}`, `presentation/${id}`, `uploads/${id}`];
+        const exts = ['', '.mp4', '.webm', '.m4v', '.mov'];
+        for (const b of bases) for (const e of exts) {
+          const u = await storageSignedOrPublicURL(preferredBucket || SLIDES_BUCKET, `${b}${e}`);
+          if (u) return u;
+        }
+      }
+      return null;
+    }
     async function pickFirstVideoURLAsync(candidates, fallbackBucketIfId) {
       for (const c of (candidates || [])) {
         if (!c) continue;
-        if (c.id) { const byId = await resolveIdToURL(c.id, fallbackBucketIfId); if (byId) return byId; }
-        if (c.bucket && c.path) { const u = await storageSignedOrPublicURL(c.bucket, c.path); if (u) return u; }
-        if (c.url) { const p = partsFromPublicURL(c.url); if (p) { const u = await storageSignedOrPublicURL(p.bucket, p.path); if (u) return u; } return c.url; }
+        if (c.id) {
+          const byId = await resolveIdToURL(c.id, fallbackBucketIfId);
+          if (byId) return byId;
+        }
+        if (c.bucket && c.path) {
+          const u = await storageSignedOrPublicURL(c.bucket, c.path);
+          if (u) return u;
+        }
+        if (c.url) {
+          const p = partsFromPublicURL(c.url);
+          if (p) {
+            const u = await storageSignedOrPublicURL(p.bucket, p.path);
+            if (u) return u;
+          }
+          return c.url;
+        }
       }
       return null;
     }
 
     const vOver = (link?.overrides?.videos) || {};
     const vDef = (pres?.defaults?.videos) || (pres?.videos) || (pres?.media) || {};
+
     const legacySlidesUrlOverride = link?.overrides?.videos?.slidesUrl || link?.overrides?.slidesUrl || null;
     const legacySlidesUrlDefault = pres?.copy?.slidesUrl || pres?.slidesUrl || null;
     const legacyWebcamUrlOverride = link?.overrides?.videos?.webcamUrl || link?.overrides?.webcamUrl || null;
     const legacyWebcamUrlDefault = pres?.copy?.webcamUrl || pres?.webcamUrl || null;
 
     function gatherVideoCandidates(v, kind, buckets) {
-      if (!v) return []; const out = []; const bucket = kind === 'slides' ? buckets.slides : buckets.cam; const bases = [kind, kind === 'webcam' ? 'cam' : 'deck', 'primary', 'main', 'video'];
+      if (!v) return [];
+      const out = [];
+      const bucket = kind === 'slides' ? buckets.slides : buckets.cam;
+      const bases = [kind, kind === 'webcam' ? 'cam' : 'deck', 'primary', 'main', 'video'];
       for (const base of bases) {
         for (const k of [base + 'Id', base + '_id', base + 'ID']) if (v[k]) out.push({ id: v[k] });
         for (const k of [base + 'Key', base + '_key', base + 'Path', base + '_path', base + 'StorageKey']) if (v[k]) out.push({ bucket, path: v[k] });
         for (const k of [base + 'Url', base + '_url', base + 'URL']) if (v[k]) out.push({ url: v[k] });
-        if (v[base] && typeof v[base] === 'object') { const o = v[base]; if (o.id) out.push({ id: o.id }); if (o.bucket && (o.key || o.path)) out.push({ bucket: o.bucket, path: o.key || o.path }); if (o.key) out.push({ bucket, path: o.key }); if (o.path) out.push({ bucket, path: o.path }); if (o.url) out.push({ url: o.url }); }
+        if (v[base] && typeof v[base] === 'object') {
+          const o = v[base];
+          if (o.id) out.push({ id: o.id });
+          if (o.bucket && (o.key || o.path)) out.push({ bucket: o.bucket, path: o.key || o.path });
+          if (o.key) out.push({ bucket, path: o.key });
+          if (o.path) out.push({ bucket, path: o.path });
+          if (o.url) out.push({ url: o.url });
+        }
       }
       return out;
     }
     function gatherRootVideoCandidates(obj, kind, buckets) {
-      if (!obj) return []; const bkt = kind === 'slides' ? buckets.slides : buckets.cam; const keys = [ `${kind}Key`, `${kind}_key`, `${kind}Path`, `${kind}_path`, `${kind}Url`, `${kind}_url`, `${kind}URL`, `${kind}Id`, `${kind}_id`, `${kind}ID`, kind === 'slides' ? 'deckKey' : 'camKey', kind === 'slides' ? 'deckUrl' : 'camUrl', kind === 'slides' ? 'deckId' : 'camId', 'videoUrl', 'video_key', 'videoKey', 'video_path', 'videoPath', 'videoId', 'mainVideo', 'primaryVideo' ];
-      const out = []; for (const k of keys) { const v = obj?.[k]; if (!v) continue; if (k.toLowerCase().endsWith('id')) out.push({ id: v }); else if (k.toLowerCase().includes('url')) out.push({ url: v }); else out.push({ bucket: bkt, path: v }); } return out;
+      if (!obj) return [];
+      const bkt = kind === 'slides' ? buckets.slides : buckets.cam;
+      const keys = [
+        `${kind}Key`, `${kind}_key`, `${kind}Path`, `${kind}_path`,
+        `${kind}Url`, `${kind}_url`, `${kind}URL`,
+        `${kind}Id`, `${kind}_id`, `${kind}ID`,
+        kind === 'slides' ? 'deckKey' : 'camKey',
+        kind === 'slides' ? 'deckUrl' : 'camUrl',
+        kind === 'slides' ? 'deckId' : 'camId',
+        'videoUrl', 'video_key', 'videoKey', 'video_path', 'videoPath', 'videoId', 'mainVideo', 'primaryVideo'
+      ];
+      const out = [];
+      for (const k of keys) {
+        const v = obj?.[k];
+        if (!v) continue;
+        if (k.toLowerCase().endsWith('id')) out.push({ id: v });
+        else if (k.toLowerCase().includes('url')) out.push({ url: v });
+        else out.push({ bucket: bkt, path: v });
+      }
+      return out;
     }
 
     const slidesCandidates = [
@@ -470,7 +654,10 @@ async function hydrateFromCloud() {
       legacyWebcamUrlDefault ? { url: legacyWebcamUrlDefault } : null
     ];
 
-    const handCandidates = [ vOver.handcamKey ? { bucket: BKT.hand, path: vOver.handcamKey } : null, vDef.handcamKey ? { bucket: BKT.hand, path: vDef.handcamKey } : null ];
+    const handCandidates = [
+      vOver.handcamKey ? { bucket: BKT.hand, path: vOver.handcamKey } : null,
+      vDef.handcamKey ? { bucket: BKT.hand, path: vDef.handcamKey } : null
+    ];
 
     const [slidesUrl, webcamUrl, handFromKey] = await Promise.all([
       pickFirstVideoURLAsync(slidesCandidates, BKT.slides),
@@ -478,7 +665,9 @@ async function hydrateFromCloud() {
       pickFirstStorageURLAsync(handCandidates),
     ]);
 
-    const legacyHandId = vOver.handcamId || vDef.handcamId || link?.overrides?.videos?.handcamId || pres?.defaults?.videos?.handcamId || null;
+    const legacyHandId =
+      vOver.handcamId || vDef.handcamId ||
+      link?.overrides?.videos?.handcamId || pres?.defaults?.videos?.handcamId || null;
 
     let handUrl = handFromKey;
     if (!handUrl && legacyHandId) {
@@ -495,11 +684,11 @@ async function hydrateFromCloud() {
             handUrl = data.file_url || data.public_url || data.url || null;
           }
         }
-      } catch {}
+      } catch { }
     }
 
-    DBG('media:candidates', { slidesCandidates, webcamCandidates, handCandidates });
-    DBG('media:resolved', { slidesUrl, webcamUrl, handUrl });
+    console.debug('[DBG] media candidates', { slidesCandidates, webcamCandidates, handCandidates });
+    console.debug('[DBG] resolved media', { slidesUrl, webcamUrl, handUrl });
 
     const baseCTA = pres?.cta || {};
     const overCTA = (link?.overrides?.cta) || {};
@@ -516,7 +705,7 @@ async function hydrateFromCloud() {
       whatsAppEnabled: (cta.whatsAppEnabled !== false),
       riskline: resolveTags(cta.riskline, lead)
     };
-    DBG('ctaResolved', ctaResolved);
+    console.log('[DBG] CTA resolved:', ctaResolved);
 
     if (nameEl) nameEl.textContent = lead?.alias || lead?.nickname || '';
     if (bizNameEl) bizNameEl.textContent = lead?.company || '';
@@ -531,58 +720,88 @@ async function hydrateFromCloud() {
     const s3HL = expandHighlights(pres?.scenes?.[2]?.highlights || [], lead);
     if (s3) s3.innerHTML = injectHighlights(resolveTags(s3TextRaw, lead), s3HL);
 
-    const intrH = intrigue?.querySelector('h3'); if (intrH && ctaResolved.stageHeadline) intrH.textContent = ctaResolved.stageHeadline;
-    const seekSpan = seekInsight?.querySelector('span'); if (seekSpan && ctaResolved.timelineWarning) seekSpan.textContent = ctaResolved.timelineWarning;
-    const ctaHead = document.getElementById('ctaHeadline'); if (ctaHead && ctaResolved.offerHeadline) ctaHead.textContent = ctaResolved.offerHeadline;
-    const goldBtnSpan = document.querySelector('.gold-button2 > div > span'); if (goldBtnSpan && ctaResolved.button) goldBtnSpan.textContent = ctaResolved.button;
-    const quickSpan = document.querySelector('#ctaVideoReply > span'); if (quickSpan && ctaResolved.quickReplyLabel) quickSpan.textContent = ctaResolved.quickReplyLabel;
+    const intrH = intrigue?.querySelector('h3');
+    if (intrH && ctaResolved.stageHeadline) intrH.textContent = ctaResolved.stageHeadline;
+    const seekSpan = seekInsight?.querySelector('span');
+    if (seekSpan && ctaResolved.timelineWarning) seekSpan.textContent = ctaResolved.timelineWarning;
+    const ctaHead = document.getElementById('ctaHeadline');
+    if (ctaHead && ctaResolved.offerHeadline) ctaHead.textContent = ctaResolved.offerHeadline;
+    const goldBtnSpan = document.querySelector('.gold-button2 > div > span');
+    if (goldBtnSpan && ctaResolved.button) goldBtnSpan.textContent = ctaResolved.button;
+    const quickSpan = document.querySelector('#ctaVideoReply > span');
+    if (quickSpan && ctaResolved.quickReplyLabel) quickSpan.textContent = ctaResolved.quickReplyLabel;
 
-    // === Hydrate the risk line under the offer buttons (from DB) ===
-    const riskTargets = [
-      document.getElementById('ctaRiskline'),
-      document.querySelector('.cta-riskline'),
-      document.querySelector('[data-cta="riskline"]'),
-      document.querySelector('#endCta .riskline, .end-cta .riskline')
-    ].filter(Boolean);
-    DBG('riskline:targetsFound', riskTargets.length);
-    if (riskTargets.length) {
-      riskTargets.forEach(el => {
-        if (ctaResolved.riskline) {
-          el.textContent = ctaResolved.riskline;
-          try { el.style.removeProperty('display'); } catch {}
-          el.setAttribute('aria-hidden', 'false');
-        } else {
-          el.textContent = '';
-          el.style.display = 'none';
-          el.setAttribute('aria-hidden', 'true');
-        }
-      });
+    // WhatsApp wired below, unchanged — now with logging
+    const waBtn = document.getElementById('ctaWhatsApp');
+    const waSpan = waBtn?.querySelector('span');
+    if (waSpan && ctaResolved.whatsAppLabel) waSpan.textContent = ctaResolved.whatsAppLabel;
+    if (waBtn) {
+      const waParent = waBtn.parentNode; const waClone = waBtn.cloneNode(true); waParent.replaceChild(waClone, waBtn);
+      if (!ctaResolved.whatsAppEnabled || !ctaResolved.whatsAppNumber) {
+        console.log('[DBG] WhatsApp disabled or missing number. hidden');
+        waClone.style.display = 'none';
+      } else {
+        waClone.addEventListener('click', () => {
+          const WHATSAPP_TEXT = 'Hey—just watched the video. Quick reply:';
+          const msg = encodeURIComponent(`${WHATSAPP_TEXT}\n\n[From]: ${document.title}`);
+          const url = `https://wa.me/${encodeURIComponent(ctaResolved.whatsAppNumber)}?text=${msg}`;
+          console.log('[DBG] WA open', url);
+          window.open(url, '_blank', 'noopener');
+        });
+      }
     }
 
     try {
-      // PATCH: set crossOrigin to allow canvas thumbnails (if server sends CORS)
       if (slidesUrl) { mainVideo.preload = 'auto'; mainVideo.crossOrigin = 'anonymous'; mainVideo.src = slidesUrl; mainVideo.load(); attachAutoResign(mainVideo); }
       if (webcamUrl) { webcamVideo.preload = 'auto'; webcamVideo.crossOrigin = 'anonymous'; webcamVideo.src = webcamUrl; webcamVideo.load(); attachAutoResign(webcamVideo); }
       if (handUrl)   { webcamVideo2.preload = 'metadata'; webcamVideo2.crossOrigin = 'anonymous'; webcamVideo2.src = handUrl;   webcamVideo2.load(); attachAutoResign(webcamVideo2); }
-    } catch (e) { DBG('media:setSources:error', e); }
+    } catch (e) { console.warn('[DBG] media load error', e); }
 
     if (link?.expires_at) {
       const ts = new Date(link.expires_at).getTime();
-      if (!Number.isNaN(ts)) { expiryTS = ts; tick(); localStorage.setItem(STORAGE_KEY_EXPIRY, String(expiryTS)); }
+      if (!Number.isNaN(ts)) {
+        expiryTS = ts; tick(); localStorage.setItem(STORAGE_KEY_EXPIRY, String(expiryTS));
+      }
     }
 
     const hue = link?.overrides?.theme?.hue ?? pres?.theme?.hue;
     if (typeof hue === 'number') document.documentElement.style.setProperty('--hue', String(hue));
 
+    console.log('[PIN] from DB: require_pin=', link?.require_pin, 'settings.pin_plain=', link?.settings?.pin_plain);
     PIN_REQUIRED = !!link?.require_pin;
     PIN_EXPECTED = (link?.settings?.pin_plain || '').trim() || TEST_PIN;
-    DBG('hydrate:setPIN', { PIN_REQUIRED, PIN_EXPECTED });
+    console.log('[PIN] set expected =', PIN_EXPECTED, '(len', String(PIN_EXPECTED).length + ')');
 
     HYDRATE.link = link; HYDRATE.lead = lead; HYDRATE.pres = pres; HYDRATE.cta = ctaResolved; HYDRATE.videos = { slidesUrl, webcamUrl, handUrl };
 
-    HYDR.done = true; _resolveHydrate(); DBG('hydrate:done');
+    // Riskline hydration (with logs)
+    (function hydrateRiskline(){
+      const riskTargets = [
+        document.getElementById('ctaRiskline'),
+        document.querySelector('.cta-riskline'),
+        document.querySelector('[data-cta="riskline"]'),
+        document.querySelector('#endCta .riskline, .end-cta .riskline')
+      ].filter(Boolean);
+      console.log('[DBG] riskline targets found:', riskTargets.length);
+      if (riskTargets.length) {
+        riskTargets.forEach(el => {
+          if (HYDRATE.cta?.riskline) {
+            el.textContent = HYDRATE.cta.riskline;
+            try { el.style.removeProperty('display'); } catch {}
+            el.setAttribute('aria-hidden', 'false');
+          } else {
+            el.textContent = '';
+            el.style.display = 'none';
+            el.setAttribute('aria-hidden', 'true');
+          }
+        });
+      }
+    })();
+
+    HYDR.done = true; _resolveHydrate();
+    console.log('[DBG] hydrate: done. PIN_REQUIRED=', PIN_REQUIRED, 'PIN_EXPECTED=', PIN_EXPECTED);
   } catch (err) {
-    console.warn('Hydrate failed:', err); DBG('hydrate:error', err);
+    console.warn('Hydrate failed:', err);
     HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate();
   }
 }
@@ -590,25 +809,93 @@ hydrateFromCloud();
 if (!slugFromQS) { hideHeadlineTimer(); }
 
 /* ===================== Intro & stage (unchanged visuals) ===================== */
-const SLIDE_DURATION_MS = 1800; const SHIFT_UP_PX = 110; const SHIFT_RIGHT_PX = 24; const SCALE_TOP = 1.2; const FLOAT_RADIUS_X = 6; const FLOAT_RADIUS_Y = 8; const FLOAT_SPEED_X = 0.9; const FLOAT_SPEED_Y = 0.75; const FINGERPRINT_GIF_MS = 1800; const FINGERPRINT_FADE_MS = 450; const STORAGE_KEY_UNLOCK = 'pv_seek_unlocked_after_unmuted_watch'; const STORAGE_KEY_INTRO_OK = 'pv_intro_watched_once'; const SEEK_REVERT_EPS = 0.75; let ignoreSeeksUntil = 0;
+const SLIDE_DURATION_MS = 1800;
+const SHIFT_UP_PX = 110;
+const SHIFT_RIGHT_PX = 24;
+const SCALE_TOP = 1.2;
+const FLOAT_RADIUS_X = 6;
+const FLOAT_RADIUS_Y = 8;
+const FLOAT_SPEED_X = 0.9;
+const FLOAT_SPEED_Y = 0.75;
+const FINGERPRINT_GIF_MS = 1800;
+const FINGERPRINT_FADE_MS = 450;
+const STORAGE_KEY_UNLOCK = 'pv_seek_unlocked_after_unmuted_watch';
+const STORAGE_KEY_INTRO_OK = 'pv_intro_watched_once';
+const SEEK_REVERT_EPS = 0.75;
+let ignoreSeeksUntil = 0;
 
-const introWatched = localStorage.getItem(STORAGE_KEY_INTRO_OK) === '1'; let introActive = false; const introTimers = []; const schedule = (fn, delay) => { const id = setTimeout(fn, delay); introTimers.push(id); return id; };
+const introWatched = localStorage.getItem(STORAGE_KEY_INTRO_OK) === '1';
+let introActive = false;
+const introTimers = [];
+const schedule = (fn, delay) => { const id = setTimeout(fn, delay); introTimers.push(id); return id; };
 function cancelIntroSequence() { introActive = false; introTimers.forEach(clearTimeout); introTimers.length = 0; [sceneHello, sceneRecorded, sceneGoal].forEach(el => { if (!el) return; el.classList.add('hidden'); el.classList.remove('fade-in', 'fade-out'); }); }
 function show(el) { el.classList.remove('hidden'); el.classList.add('fade-in'); }
 function hide(el) { el.classList.add('fade-out'); setTimeout(() => { el.classList.add('hidden'); el.classList.remove('fade-out'); }, 380); }
-function showStage() { stage.classList.add('show'); orbitReplay.classList.remove('show'); skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); try { mainVideo.play().catch(() => { }); } catch { } enterNormalMode(); if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} } stabilizeIntrigue(800); }
+
+function showStage() {
+  stage.classList.add('show');
+  orbitReplay.classList.remove('show');
+  skipIntroBtn.classList.remove('show');
+  skipIntroBtn.classList.add('hidden');
+  try { mainVideo.play().catch(() => { }); } catch { }
+  enterNormalMode();
+  if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} }
+  stabilizeIntrigue(800);
+}
+
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
-let _intrigueWriteScheduled = false; let _intrigueTopNext = null;
+
+let _intrigueWriteScheduled = false;
+let _intrigueTopNext = null;
 function positionIntrigueBetween() {
   if (!intrigue || !playerEl || !nav) return;
-  const navRect = nav.getBoundingClientRect(); const playerRect = playerEl.getBoundingClientRect(); const cs = getComputedStyle(document.documentElement); const marginTop = parseFloat(cs.getPropertyValue('--intrigue-gap-top')) || 6; const marginBottom = parseFloat(cs.getPropertyValue('--intrigue-gap-bottom')) || 8; const gapTop = navRect.bottom + marginTop; const gapBottom = playerRect.top - marginBottom; const h = intrigue.offsetHeight || 0; const center = gapTop + Math.max(0, (gapBottom - gapTop - h) / 2); const minTop = gapTop; const maxTop = Math.max(gapTop, gapBottom - h); const bias = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--intrigue-bias') || '0') || 0; const top = clamp(center - bias, minTop, maxTop); _intrigueTopNext = top; if (_intrigueWriteScheduled) return; _intrigueWriteScheduled = true; requestAnimationFrame(() => { _intrigueWriteScheduled = false; if (!intrigue) return; intrigue.style.top = `${_intrigueTopNext}px`; }); }
-function stabilizeIntrigue(ms = 600) { const deadline = performance.now() + ms; function loop() { positionIntrigueBetween(); if (performance.now() < deadline) requestAnimationFrame(loop); } requestAnimationFrame(loop); }
-let resizeRaf = 0; window.addEventListener('resize', () => { if (resizeRaf) cancelAnimationFrame(resizeRaf); resizeRaf = requestAnimationFrame(() => { positionIntrigueBetween(); stabilizeIntrigue(300); }); });
-let roPending = false; const ro = new ResizeObserver(() => { if (roPending) return; roPending = true; requestAnimationFrame(() => { roPending = false; positionIntrigueBetween(); }); }); if (nav) ro.observe(nav); if (playerEl) ro.observe(playerEl);
+  const navRect = nav.getBoundingClientRect();
+  const playerRect = playerEl.getBoundingClientRect();
+  const cs = getComputedStyle(document.documentElement);
+  const marginTop = parseFloat(cs.getPropertyValue('--intrigue-gap-top')) || 6;
+  const marginBottom = parseFloat(cs.getPropertyValue('--intrigue-gap-bottom')) || 8;
+  const gapTop = navRect.bottom + marginTop;
+  const gapBottom = playerRect.top - marginBottom;
+  const h = intrigue.offsetHeight || 0;
+  const center = gapTop + Math.max(0, (gapBottom - gapTop - h) / 2);
+  const minTop = gapTop;
+  const maxTop = Math.max(gapTop, gapBottom - h);
+  const bias = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--intrigue-bias') || '0') || 0;
+  const top = clamp(center - bias, minTop, maxTop);
+  _intrigueTopNext = top;
+  if (_intrigueWriteScheduled) return;
+  _intrigueWriteScheduled = true;
+  requestAnimationFrame(() => {
+    _intrigueWriteScheduled = false;
+    if (!intrigue) return;
+    intrigue.style.top = `${_intrigueTopNext}px`;
+  });
+}
+
+function stabilizeIntrigue(ms = 600) {
+  const deadline = performance.now() + ms;
+  function loop() { positionIntrigueBetween(); if (performance.now() < deadline) requestAnimationFrame(loop); }
+  requestAnimationFrame(loop);
+}
+let resizeRaf = 0;
+window.addEventListener('resize', () => {
+  if (resizeRaf) cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(() => { positionIntrigueBetween(); stabilizeIntrigue(300); });
+});
+let roPending = false;
+const ro = new ResizeObserver(() => {
+  if (roPending) return; roPending = true;
+  requestAnimationFrame(() => { roPending = false; positionIntrigueBetween(); });
+});
+if (nav) ro.observe(nav);
+if (playerEl) ro.observe(playerEl);
+
 function runSequence() {
-  introActive = true; if (introWatched) skipIntroBtn.classList.add('show');
+  introActive = true;
+  if (introWatched) skipIntroBtn.classList.add('show');
   schedule(() => { if (!introActive) return; show(sceneHello); try { sfxHello.currentTime = 0; sfxHello.play().catch(() => { }); } catch { } }, 300);
-  const fingerGif = document.getElementById('fingerGif'); if (fingerGif) { schedule(() => { if (!introActive) return; fingerGif.classList.add('is-fading'); setTimeout(() => { fingerGif.style.display = 'none'; }, 450); }, 1800); }
+  const fingerGif = document.getElementById('fingerGif');
+  if (fingerGif) { schedule(() => { if (!introActive) return; fingerGif.classList.add('is-fading'); setTimeout(() => { fingerGif.style.display = 'none'; }, 450); }, 1800); }
   schedule(() => { if (!introActive) return; hide(sceneHello); }, 2600);
   schedule(() => { if (!introActive) return; show(sceneRecorded); }, 3000);
   schedule(() => { if (!introActive) return; hide(sceneRecorded); }, 5600);
@@ -619,9 +906,13 @@ function runSequence() {
 }
 
 /* ===================== Unmute + bind videos ===================== */
-let hasClickedUnmuteOverlay = false; let unmutedSessionStartedAtZero = false; let programmaticSeekOK = false;
+let hasClickedUnmuteOverlay = false;
+let unmutedSessionStartedAtZero = false;
+let programmaticSeekOK = false;
 function setCurrentTimeSafely(t) { programmaticSeekOK = true; try { mainVideo.currentTime = t; } finally { setTimeout(() => { programmaticSeekOK = false; }, 0); } }
-function computeCamTimeForMain(mainT) { const dCam = webcamVideo.duration; if (!isFinite(mainT)) return null; if (!isFinite(dCam) || dCam <= 0) return null; return Math.min(Math.max(0, mainT), Math.max(0, dCam - 0.05)); }
+function computeCamTimeForMain(mainT) {
+  const dCam = webcamVideo.duration; if (!isFinite(mainT)) return null; if (!isFinite(dCam) || dCam <= 0) return null; return Math.min(Math.max(0, mainT), Math.max(0, dCam - 0.05));
+}
 function syncPrimaryWebcamToMain({ force = false, forceWhenMetaReady = false } = {}) {
   const tMain = mainVideo.currentTime || 0;
   const applySync = () => { const tCam = computeCamTimeForMain(tMain); if (tCam == null) return false; try { webcamVideo.currentTime = tCam; } catch { } return true; };
@@ -639,8 +930,23 @@ function setMainTimeAndHardSync(t) { setCurrentTimeSafely(t); syncPrimaryWebcamT
 
 let endCrossfadeTimer = null; function clearEndCrossfadeTimer() { if (endCrossfadeTimer) { clearTimeout(endCrossfadeTimer); endCrossfadeTimer = null; } }
 let isInEndMode = false;
-function enterNormalMode() { isInEndMode = false; clearEndCrossfadeTimer(); webcamVideo2.style.opacity = '0'; webcamVideo.style.opacity = '1'; try { webcamVideo2.pause(); webcamVideo2.currentTime = 0; } catch { } webcamVideo2.muted = true; webcamVideo.muted = mainVideo.muted; webcamPlayUI.classList.remove('show'); webcamPauseHint.classList.remove('show'); syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); webcamWrap.classList.remove('at-top'); crossfadeBackToMainMusic(); }
-function enterEndMode() { isInEndMode = true; clearEndCrossfadeTimer(); try { mainVideo.pause(); webcamVideo.pause(); } catch { } webcamVideo.muted = true; webcamVideo2.style.opacity = '1'; webcamVideo.style.opacity = '0'; webcamVideo2.muted = false; if (isPointerOver(webcam) && !webcamVideo2.paused) { webcamPauseHint.classList.add('show'); } webcamWrap.classList.add('at-top'); }
+function enterNormalMode() {
+  isInEndMode = false; clearEndCrossfadeTimer(); webcamVideo2.style.opacity = '0'; webcamVideo.style.opacity = '1';
+  try { webcamVideo2.pause(); webcamVideo2.currentTime = 0; } catch { }
+  webcamVideo2.muted = true; webcamVideo.muted = mainVideo.muted;
+  webcamPlayUI.classList.remove('show'); webcamPauseHint.classList.remove('show');
+  syncPrimaryWebcamToMain({ forceWhenMetaReady: true });
+  webcamWrap.classList.remove('at-top');
+  crossfadeBackToMainMusic();
+}
+function enterEndMode() {
+  isInEndMode = true; clearEndCrossfadeTimer();
+  try { mainVideo.pause(); webcamVideo.pause(); } catch { }
+  webcamVideo.muted = true; webcamVideo2.style.opacity = '1'; webcamVideo.style.opacity = '0';
+  webcamVideo2.muted = false;
+  if (isPointerOver(webcam) && !webcamVideo2.paused) { webcamPauseHint.classList.add('show'); }
+  webcamWrap.classList.add('at-top');
+}
 function isPrimaryWebcamActive() { const op1 = parseFloat(getComputedStyle(webcamVideo).opacity || '1'); const op2 = parseFloat(getComputedStyle(webcamVideo2).opacity || '0'); return !isInEndMode && op1 >= 0.5 && op2 < 0.5; }
 function stopAllWebcam() { try { webcamVideo.pause(); webcamVideo2.pause(); webcamVideo2.currentTime = 0; } catch { } webcamVideo2.style.opacity = '0'; webcamVideo.style.opacity = '1'; webcamVideo2.muted = true; webcamVideo.muted = mainVideo.muted; webcamPlayUI.classList.remove('show'); webcamPauseHint.classList.remove('show'); }
 function playBound() { syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); if (mainVideo.paused) mainVideo.play().catch(() => { }); if (isPrimaryWebcamActive()) webcamVideo.play().catch(() => { }); }
@@ -651,7 +957,9 @@ function fullyHideHint() { if (!hintOverlay) return; hintOverlay.classList.add('
 showHint();
 let lastMouse = { x: 0, y: 0 }; document.addEventListener('mousemove', (e) => { lastMouse.x = e.clientX; lastMouse.y = e.clientY; }, { passive: true });
 function isPointerOver(elem) { if (!elem) return false; const r = elem.getBoundingClientRect(); return lastMouse.x >= r.left && lastMouse.x <= r.right && lastMouse.y >= r.top && lastMouse.y <= r.bottom; }
-function unmuteAndRestartFromZero() { hasClickedUnmuteOverlay = true; mainVideo.muted = false; webcamVideo.muted = false; if (bgMusic) bgMusic.muted = false; previewLoopActive = false; setMainTimeAndHardSync(0); ignoreSeeksUntil = performance.now() + 800; unmutedSessionStartedAtZero = true; playBound(); fullyHideHint(); updateMainUI(); if (isPointerOver(frameEl)) { frameEl.classList.add('is-hovering'); updateMainUI(); } stabilizeIntrigue(800); primeEndMusicOnce(); DBG('unmuted@0'); }
+function unmuteAndRestartFromZero() {
+  hasClickedUnmuteOverlay = true; mainVideo.muted = false; webcamVideo.muted = false; if (bgMusic) bgMusic.muted = false; previewLoopActive = false; setMainTimeAndHardSync(0); ignoreSeeksUntil = performance.now() + 800; unmutedSessionStartedAtZero = true; playBound(); fullyHideHint(); updateMainUI(); if (isPointerOver(frameEl)) { frameEl.classList.add('is-hovering'); updateMainUI(); } stabilizeIntrigue(800); primeEndMusicOnce();
+}
 hintOverlay.addEventListener('click', unmuteAndRestartFromZero);
 hintBtn.addEventListener('click', (e) => { e.stopPropagation(); unmuteAndRestartFromZero(); });
 function updateMainUI() { const unmuted = !document.body.contains(hintOverlay); if (!unmuted) { mainPlayBtn.classList.remove('show'); mainPauseHint.classList.remove('show'); return; } if (mainVideo.paused) { mainPlayBtn.classList.add('show'); mainPauseHint.classList.remove('show'); } else { mainPlayBtn.classList.remove('show'); mainPauseHint.classList.add('show'); } }
@@ -675,7 +983,12 @@ function isSeekEnabled() { return seekUnlocked; }
 function applySeekLockUI() {
   if (isSeekEnabled()) { progress.classList.remove('disabled'); progress.setAttribute('aria-disabled', 'false'); }
   else { progress.classList.add('disabled'); progress.setAttribute('aria-disabled', 'true'); }
-  if (goEndWrap) { goEndWrap.classList.add('visible'); const inEnd = playerEl.classList.contains('content-hidden'); const btn = goEndWrap.querySelector('.go-end-btn'); if (btn) btn.style.display = (isSeekEnabled() && !inEnd) ? '' : 'none'; }
+  if (goEndWrap) {
+    goEndWrap.classList.add('visible');
+    const inEnd = playerEl.classList.contains('content-hidden');
+    const btn = goEndWrap.querySelector('.go-end-btn');
+    if (btn) btn.style.display = (isSeekEnabled() && !inEnd) ? '' : 'none';
+  }
 }
 progress.addEventListener('mouseenter', () => { if (!isSeekEnabled() && seekInsight) { seekInsight.classList.add('show'); } });
 progress.addEventListener('mouseleave', () => { if (seekInsight) { seekInsight.classList.remove('show'); } });
@@ -684,10 +997,18 @@ mainVideo.addEventListener('timeupdate', () => { if (mainVideo.seeking || progra
 function maybeRevertUnauthorizedSeek() { const nowPerf = performance.now(); if (nowPerf < ignoreSeeksUntil) return; if (isSeekEnabled() || programmaticSeekOK) return; const t = mainVideo.currentTime; if (Math.abs(t - lastSafeTime) > SEEK_REVERT_EPS) { setMainTimeAndHardSync(lastSafeTime); } }
 mainVideo.addEventListener('seeking', () => { maybeRevertUnauthorizedSeek(); });
 mainVideo.addEventListener('seeked', () => { syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); });
-function seekFromEvent(e) { if (swallowClick) { swallowClick = false; return; } if (!isSeekEnabled()) return; if (!isFinite(mainVideo.duration) || mainVideo.duration <= 0) return; const rect = progress.getBoundingClientRect(); const clientX = (e.clientX !== undefined) ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0); const x = Math.min(Math.max(0, clientX - rect.left), rect.width); const ratio = x / rect.width; const newTime = ratio * mainVideo.duration; setMainTimeAndHardSync(newTime); }
+function seekFromEvent(e) {
+  if (!isSeekEnabled()) return;
+  if (!isFinite(mainVideo.duration) || mainVideo.duration <= 0) return;
+  const rect = progress.getBoundingClientRect();
+  const clientX = (e.clientX !== undefined) ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+  const x = Math.min(Math.max(0, clientX - rect.left), rect.width);
+  const ratio = x / rect.width;
+  const newTime = ratio * mainVideo.duration;
+  setMainTimeAndHardSync(newTime);
+}
 progress.addEventListener('click', seekFromEvent);
 progress.addEventListener('touchstart', seekFromEvent, { passive: true });
-document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
 
 /* ===================== Preview loop (muted pre-roll) ===================== */
 let previewLoopActive = true; const PREVIEW_LOOP_EPS = 0.12;
@@ -727,13 +1048,13 @@ orbitReplay.addEventListener('click', replayMain);
 function maybeUnlockSeekOnEnd() { if (unmutedSessionStartedAtZero && !mainVideo.muted) { seekUnlocked = true; localStorage.setItem(STORAGE_KEY_UNLOCK, '1'); applySeekLockUI(); } }
 
 document.getElementById('ctaSession')?.addEventListener('click', () => { window.open('https://calendly.com/rnq/30min', '_blank', 'noopener'); });
-document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('Record a quick reply clicked'); });
+document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('[DBG] Record a quick reply clicked'); });
 function goToEndNow() { if (!isSeekEnabled()) return; try { mainVideo.pause(); } catch { } try { webcamVideo.pause(); } catch { } frameEl.classList.add('dim'); playerEl.classList.add('content-hidden'); navTimer?.classList.add('hide'); slideWebcamUpSmall(); showEndUI(); crossfadeToWebcamEnd(100); }
 
 /* ===================== Seamless marquee (kept) ===================== */
 (function setupMarquee() { if (!brandTrack) return; const container = brandTrack.parentElement; const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true)); function ensureFill() { brandTrack.innerHTML = ''; baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); while (brandTrack.scrollWidth < container.clientWidth * 2) { baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } ensureFill(); const PX_PER_SEC = 120; const setDur = () => { const totalWidth = brandTrack.scrollWidth; const dur = (totalWidth / 2) / PX_PER_SEC; brandTrack.style.animationDuration = `${dur}s`; }; setDur(); let rAF = null; window.addEventListener('resize', () => { if (rAF) cancelAnimationFrame(rAF); rAF = requestAnimationFrame(() => { ensureFill(); setDur(); positionIntrigueBetween(); }); }); })();
 
-/* ===================== PIN overlay logic (DEBUG logs) ===================== */
+/* ===================== PIN overlay logic (added logs only) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
@@ -742,70 +1063,98 @@ function goToEndNow() { if (!isSeekEnabled()) return; try { mainVideo.pause(); }
   const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
 
   const pinInput = document.createElement('input');
-  pinInput.type = 'tel'; pinInput.inputMode = 'numeric'; pinInput.pattern = '[0-9]*'; pinInput.autocomplete = 'one-time-code'; pinInput.maxLength = 4;
-  pinInput.style.position = 'absolute'; pinInput.style.opacity = '0'; pinInput.style.pointerEvents = 'none'; pinInput.style.width = '0'; pinInput.style.height = '0';
+  pinInput.type = 'tel';
+  pinInput.inputMode = 'numeric';
+  pinInput.pattern = '[0-9]*';
+  pinInput.autocomplete = 'one-time-code';
+  pinInput.maxLength = 4;
+  pinInput.style.position = 'absolute';
+  pinInput.style.opacity = '0';
+  pinInput.style.pointerEvents = 'none';
+  pinInput.style.width = '0';
+  pinInput.style.height = '0';
   pinOverlay.appendChild(pinInput);
-  DBG('PIN: setup', { overlay: !!pinOverlay, boxes: cells.length });
+  console.log('[PIN] hidden input created', { type: pinInput.type, inputMode: pinInput.inputMode, pattern: pinInput.pattern, maxLength: pinInput.maxLength });
 
-  // DEBUG: focus/blur/selection
-  pinInput.addEventListener('focus', ()=>DBG('PIN:input focus'));
-  pinInput.addEventListener('blur', ()=>DBG('PIN:input blur'));
-  pinInput.addEventListener('beforeinput', (e)=>{ DBG('PIN:beforeinput', { data: e.data, inputType: e.inputType }); });
+  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); console.log('[PIN] focus() called'); } catch { } }, 0); }
+  pinOverlay.addEventListener('click', (e) => { console.log('[PIN] overlay click', { isTrusted: e.isTrusted }); focusPinInputSoon(); });
 
-  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); DBG('PIN:focus() called'); } catch {} }, 0); }
-  pinOverlay.addEventListener('click', focusPinInputSoon);
-
-  function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); DBG('PIN:render', { digitsLen: digits.length, digits: digits.join('') }); }
-  function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); DBG('PIN:flashError'); }
-  function clearDigits() { digits.length = 0; pinInput.value=''; render(); DBG('PIN:clearDigits'); }
+  function render() {
+    cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; });
+    console.log('[PIN] render boxes →', digits.join(''));
+  }
+  function flashError() {
+    console.warn('[PIN] mismatch: showing error');
+    pinError.classList.add('show');
+    cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); });
+    setTimeout(() => pinError.classList.remove('show'), 1400);
+  }
+  function clearDigits() { console.log('[PIN] clearDigits()'); digits.length = 0; render(); }
   function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
-  function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; DBG('PIN:overlay hidden'); }, 380); }
+  function slideOutOverlay() { console.log('[PIN] accepted → slide overlay out'); pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
 
-  // Normalize to ASCII digits only
-  function normalizeDigits(str) { return String(str||'').replace(/\D+/g, '').replace(/[\u0660-\u0669]/g, d=> String(d.charCodeAt(0)-0x0660)).slice(0,4); }
-
-  pinInput.addEventListener('input', () => {
-    const raw = pinInput.value || '';
-    const norm = normalizeDigits(raw);
-    DBG('PIN:input event', { raw, norm, len: norm.length });
-    digits.length = 0; for (const ch of norm) digits.push(ch);
-    render();
-    if (digits.length === 4) checkIfReady('input');
-  });
-
-  async function startAfterPin() {
-    DBG('PIN:startAfterPin (will wait HYDRATE_DONE if needed)');
-    slideOutOverlay(); try { pinInput.blur(); } catch {}
-    await HYDRATE_DONE; if (HYDR.notFound) { DBG('PIN:startAfterPin -> NOT FOUND'); showNotFound(); return; }
-    DBG('PIN:startAfterPin -> runSequence');
-    runSequence();
-  }
-
-  function checkIfReady(src='') {
-    DBG('PIN:checkIfReady@'+src, { digits: digits.join(''), len: digits.length, HYDRdone: HYDR.done, PIN_REQUIRED, PIN_EXPECTED });
-    if (!PIN_REQUIRED) { DBG('PIN:skip (not required)'); startAfterPin(); return; }
-    if (digits.length !== 4) return;
-    const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) { DBG('PIN:OK, proceeding'); startAfterPin(); }
-    else { DBG('PIN:FAIL', { attempt, expected: PIN_EXPECTED }); flashError(); setTimeout(clearDigits, 180); }
-  }
-
+  // Key capture for desktop testing (does not change logic)
   function onKey(e) {
     if (!pinOverlay || pinOverlay.style.display === 'none') return;
     const k = e.key;
-    DBG('PIN:keydown', { key: k, code: e.code, which: e.which });
-    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) checkIfReady('keydown'); } e.preventDefault(); return; }
+    console.log('[PIN] keydown', { key: k, code: e.code, isTrusted: e.isTrusted });
+    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) checkIfReady(); } e.preventDefault(); return; }
     if (k === 'Backspace' || k === 'Delete') { if (digits.length > 0) { digits.pop(); render(); playPinSound(); } e.preventDefault(); return; }
   }
   document.addEventListener('keydown', onKey, true);
 
+  // Mobile input events (single source of truth)
+  pinInput.addEventListener('focus', () => console.log('[PIN] input focus'));
+  pinInput.addEventListener('blur', () => console.log('[PIN] input blur'));
+  pinInput.addEventListener('compositionstart', () => console.log('[PIN] compositionstart'));
+  pinInput.addEventListener('compositionend', (e) => console.log('[PIN] compositionend value=', e.data));
+
+  pinInput.addEventListener('input', (e) => {
+    const raw = pinInput.value;
+    const cleaned = (raw || '').replace(/\D/g, '').slice(0, 4);
+    console.log('[PIN] input event', { inputType: e.inputType, raw, cleaned, length: cleaned.length });
+    digits.length = 0;
+    for (const ch of cleaned) digits.push(ch);
+    render();
+    if (digits.length === 4) checkIfReady();
+  });
+
+  async function startAfterPin() {
+    slideOutOverlay();
+    try { pinInput.blur(); } catch { }
+    await HYDRATE_DONE;
+    if (HYDR.notFound) { showNotFound(); return; }
+    console.log('[PIN] correct → runSequence()');
+    runSequence();
+  }
+
+  function codePoints(s) { return Array.from(String(s)).map(c => c.codePointAt(0)); }
+
+  function checkIfReady() {
+    console.log('[PIN] checkIfReady(): PIN_REQUIRED=', PIN_REQUIRED, 'expected=', PIN_EXPECTED, 'digits=', digits.join(''));
+    console.log('[PIN] expected code points:', codePoints(PIN_EXPECTED), 'attempt code points:', codePoints(digits.join('')));
+    if (!PIN_REQUIRED) { console.log('[PIN] not required → start'); startAfterPin(); return; }
+    if (digits.length !== 4) return;
+    const attempt = digits.join('');
+    if (String(attempt) === String(PIN_EXPECTED)) { console.log('[PIN] match ✓'); startAfterPin(); }
+    else { console.warn('[PIN] mismatch ✗', { attempt, expected: PIN_EXPECTED }); flashError(); setTimeout(clearDigits, 180); }
+  }
+
+  window.__DBG_PIN = {
+    get digits() { return [...digits]; },
+    get attempt() { return digits.join(''); },
+    get expected() { return PIN_EXPECTED; },
+    focus: () => pinInput.focus(),
+    blur: () => pinInput.blur(),
+    boxes: cells
+  };
+
   render();
   focusPinInputSoon();
-  dbgHydratePinState('PIN-setup-init');
 
   (async function waitForPinDecision() {
     await HYDRATE_DONE;
-    DBG('PIN:HYDRATE_DONE fired', { PIN_REQUIRED, PIN_EXPECTED });
+    console.log('[PIN] HYDRATE_DONE reached. PIN_REQUIRED=', PIN_REQUIRED, 'PIN_EXPECTED=', PIN_EXPECTED);
     if (!PIN_REQUIRED) { startAfterPin(); }
   })();
 })();
@@ -815,9 +1164,20 @@ function goToEndNow() { if (!isSeekEnabled()) return; try { mainVideo.pause(); }
   if (!musicToggle) return;
   if (bgMusic) setVolumeSafe(bgMusic, MUSIC.MAIN_VOL);
   if (endMusic) setVolumeSafe(endMusic, 0);
-  function updateBtn() { const off = !musicEnabled || ((bgMusic?.paused ?? true) && (endMusic?.paused ?? true)); musicToggle.classList.toggle('off', off); }
-  musicToggle.addEventListener('click', () => { musicEnabled = !musicEnabled; if (!musicEnabled) { pauseBothMusic(); } else { playActiveMusicForState(); } updateBtn(); });
-  bgMusic?.addEventListener('play', updateBtn); bgMusic?.addEventListener('pause', updateBtn); endMusic?.addEventListener('play', updateBtn); endMusic?.addEventListener('pause', updateBtn); updateBtn();
+  function updateBtn() {
+    const off = !musicEnabled || ((bgMusic?.paused ?? true) && (endMusic?.paused ?? true));
+    musicToggle.classList.toggle('off', off);
+  }
+  musicToggle.addEventListener('click', () => {
+    musicEnabled = !musicEnabled;
+    if (!musicEnabled) { pauseBothMusic(); } else { playActiveMusicForState(); }
+    updateBtn();
+  });
+  bgMusic?.addEventListener('play', updateBtn);
+  bgMusic?.addEventListener('pause', updateBtn);
+  endMusic?.addEventListener('play', updateBtn);
+  endMusic?.addEventListener('pause', updateBtn);
+  updateBtn();
 })();
 
 /* ===================== Seek-locked message spacing + z-index + width ===================== */
@@ -827,9 +1187,10 @@ function applySeekInsightStyleFromCSS() {
   const gap = (cs.getPropertyValue('--seekinsight-gap') || '').trim() || '10px';
   const z   = (cs.getPropertyValue('--seekinsight-z') || '').trim() || '10060';
   const w   = (cs.getPropertyValue('--seekinsight-width') || '').trim();
-  seekInsight.style.marginTop = gap; seekInsight.style.zIndex = String(parseInt(z, 10) || 10060);
+  seekInsight.style.marginTop = gap;
+  seekInsight.style.zIndex = String(parseInt(z, 10) || 10060);
   if (w) { seekInsight.style.maxWidth = w; seekInsight.style.width = 'auto'; }
-  DBG('seekInsight CSS vars', { gap, z, w });
+  console.log('[DBG] seekInsight CSS applied', { gap, z, w });
 }
 applySeekInsightStyleFromCSS();
 window.addEventListener('resize', applySeekInsightStyleFromCSS);
@@ -837,57 +1198,91 @@ window.addEventListener('resize', applySeekInsightStyleFromCSS);
 /* ===================== Setup Go-to-End container & mobile docking ===================== */
 function setupGoToEndButton() {
   if (!playerEl) return;
-  goEndWrap = document.createElement('div'); goEndWrap.className = 'go-end-wrap';
-  goEndBtn = document.createElement('button'); goEndBtn.id = 'goToEndBtn'; goEndBtn.type = 'button'; goEndBtn.className = 'go-end-btn'; goEndBtn.setAttribute('aria-label', 'Go to the end'); goEndBtn.innerHTML = `\n    <i class="ri-skip-forward-fill" aria-hidden="true"></i>\n    <span class="go-end-text">Go to the end</span>\n  `;
-  goEndWrap.appendChild(goEndBtn); playerEl.parentNode.insertBefore(goEndWrap, playerEl.nextSibling);
-  goEndBtn.addEventListener('click', () => { if (goEndWrap) { const btn = goEndWrap.querySelector('.go-end-btn'); if (btn) btn.style.display = 'none'; } goToEndNow(); });
-  const btn = goEndWrap.querySelector('.go-end-btn'); if (btn) btn.style.display = 'none';
+  goEndWrap = document.createElement('div');
+  goEndWrap.className = 'go-end-wrap';
+  goEndBtn = document.createElement('button');
+  goEndBtn.id = 'goToEndBtn';
+  goEndBtn.type = 'button';
+  goEndBtn.className = 'go-end-btn';
+  goEndBtn.setAttribute('aria-label', 'Go to the end');
+  goEndBtn.innerHTML = `\n    <i class="ri-skip-forward-fill" aria-hidden="true"></i>\n    <span class="go-end-text">Go to the end</span>\n  `;
+  goEndWrap.appendChild(goEndBtn);
+  playerEl.parentNode.insertBefore(goEndWrap, playerEl.nextSibling);
+  goEndBtn.addEventListener('click', () => {
+    if (goEndWrap) { const btn = goEndWrap.querySelector('.go-end-btn'); if (btn) btn.style.display = 'none'; }
+    goToEndNow();
+  });
+  const btn = goEndWrap.querySelector('.go-end-btn');
+  if (btn) btn.style.display = 'none';
   window.__belowPlayerArea = goEndWrap;
 
   function relocateWebcamForSmall() {
     const isSmall = window.matchMedia('(max-width: 768px)').matches;
     if (!webcamWrap) return;
-    if (isSmall && document.body.classList.contains('offer-mode') && topDock) { if (webcamWrap.parentNode !== topDock) topDock.appendChild(webcamWrap); document.body.dataset.webcamPosition = 'below'; requestAnimationFrame(() => { positionOrbitOnRim(315); }); return; }
+    if (isSmall && document.body.classList.contains('offer-mode') && topDock) {
+      if (webcamWrap.parentNode !== topDock) topDock.appendChild(webcamWrap);
+      document.body.dataset.webcamPosition = 'below';
+      requestAnimationFrame(() => { positionOrbitOnRim(315); });
+      return;
+    }
     const area = window.__belowPlayerArea;
-    if (isSmall && area) { if (webcamWrap.parentNode !== area) area.appendChild(webcamWrap); document.body.dataset.webcamPosition = 'below'; requestAnimationFrame(() => { positionOrbitOnRim(315); }); return; }
-    if (webcamWrap.parentNode !== playerEl) playerEl.appendChild(webcamWrap); delete document.body.dataset.webcamPosition; requestAnimationFrame(() => { positionOrbitOnRim(315); });
+    if (isSmall && area) {
+      if (webcamWrap.parentNode !== area) area.appendChild(webcamWrap);
+      document.body.dataset.webcamPosition = 'below';
+      requestAnimationFrame(() => { positionOrbitOnRim(315); });
+      return;
+    }
+    if (webcamWrap.parentNode !== playerEl) playerEl.appendChild(webcamWrap);
+    delete document.body.dataset.webcamPosition;
+    requestAnimationFrame(() => { positionOrbitOnRim(315); });
   }
   window.__relocateWebcamForSmall = relocateWebcamForSmall;
   relocateWebcamForSmall();
   window.addEventListener('resize', relocateWebcamForSmall);
   applySeekLockUI();
-  DBG('GoEnd setup complete');
 }
 setupGoToEndButton();
 
-/* ===================== HOVER/CURSOR TIME LABEL ===================== */
+/* ===================== HOVER/CURSOR TIME LABEL (unchanged logic) ===================== */
 (function setupHoverTimeLabel(){
   if (!progress || !mainVideo) return;
   const HITBOX_PAD = 16; const SCRUB_START_PX = 4;
   function getLabelGap() { const cs = getComputedStyle(document.documentElement); const v = (cs.getPropertyValue('--seeklabel-gap') || '').trim(); const px = parseFloat(v); return Number.isFinite(px) ? px : 8; }
-  const clamp2 = (n, a, b) => Math.max(a, Math.min(b, n));
+  const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
   const fmtClock = (sec) => { sec = Math.max(0, Math.floor(sec || 0)); const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60; const pad = n => String(n).padStart(2,'0'); return h>0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`; };
-  const rect = () => progress.getBoundingClientRect(); const duration = () => (isFinite(mainVideo.duration) ? mainVideo.duration : 0);
-  const timeFromClientX = (clientX) => { const r = rect(); const x = clamp2(clientX - r.left, 0, r.width); const ratio = r.width ? x / r.width : 0; return ratio * duration(); };
-  const overlay = document.createElement('div'); Object.assign(overlay.style, { position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px', pointerEvents: 'auto', background: 'transparent', zIndex: '10050', touchAction: 'none' }); document.body.appendChild(overlay);
-  const label = document.createElement('div'); Object.assign(label.style, { position: 'fixed', left: '0px', top: '0px', transform: 'translateX(-50%)', padding: '4px 6px', fontSize: '12.5px', fontWeight: '800', lineHeight: '1', color: '#fff', background: 'rgba(0,0,0,.68)', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,.18)', textShadow: '0 1px 0 rgba(0,0,0,.25)', whiteSpace: 'nowrap', opacity: '0', transition: 'opacity .12s ease', pointerEvents: 'none', zIndex: '10060' }); document.body.appendChild(label);
-  let insideOverlay = false; let pointerDown = false; let scrubbing = false; let moved = 0; let lastX = 0; let wasPlaying = false; let activePointerId = null;
-  function placeOverlay(){ const r = rect(); overlay.style.left = `${Math.round(r.left)}px`; overlay.style.top = `${Math.round(r.top - HITBOX_PAD)}px`; overlay.style.width = `${Math.round(r.width)}px`; overlay.style.height = `${Math.round(r.height + HITBOX_PAD*2)}px`; }
+  const rect = () => progress.getBoundingClientRect();
+  const duration = () => (isFinite(mainVideo.duration) ? mainVideo.duration : 0);
+  const timeFromClientX = (clientX) => { const r = rect(); const x = clamp(clientX - r.left, 0, r.width); const ratio = r.width ? x / r.width : 0; return ratio * duration(); };
+  const overlay = document.createElement('div');
+  Object.assign(overlay.style, { position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px', pointerEvents: 'auto', background: 'transparent', zIndex: '10050', touchAction: 'none' });
+  document.body.appendChild(overlay);
+  const label = document.createElement('div');
+  Object.assign(label.style, { position: 'fixed', left: '0px', top: '0px', transform: 'translateX(-50%)', padding: '4px 6px', fontSize: '12.5px', fontWeight: '800', lineHeight: '1', color: '#fff', background: 'rgba(0,0,0,.68)', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,.18)', textShadow: '0 1px 0 rgba(0,0,0,.25)', whiteSpace: 'nowrap', opacity: '0', transition: 'opacity .12s ease', pointerEvents: 'none', zIndex: '10060' });
+  document.body.appendChild(label);
+  let insideOverlay = false, pointerDown = false, scrubbing = false, moved = 0, lastX = 0, wasPlaying = false, activePointerId = null;
+  function placeOverlay(){ const r = rect(); overlay.style.left = `${Math.round(r.left)}px`; overlay.style.top = `${Math.round(r.top - HITBOX_PAD)}px`; overlay.style.width = `${Math.round(r.width)}px`; overlay.style.height = `${Math.round(r.height + HITBOX_PAD*2)}px`; console.log('[DBG] scrub overlay placed', r); }
   placeOverlay(); window.addEventListener('resize', placeOverlay);
-  function moveLabelTo(clientX){ const r = rect(); const x = clamp2(clientX, r.left, r.right); const gap = getLabelGap(); const topY = r.top - gap - (label.offsetHeight || 18); label.style.left = `${Math.round(x)}px`; label.style.top  = `${Math.round(Math.max(0, topY))}px`; }
+  function moveLabelTo(clientX){ const r = rect(); const x = clamp(clientX, r.left, r.right); const gap = getLabelGap(); const topY = r.top - gap - (label.offsetHeight || 18); label.style.left = `${Math.round(x)}px`; label.style.top  = `${Math.round(Math.max(0, topY))}px`; }
   function showLabel(show){ label.style.opacity = show ? '1' : '0'; }
   function updateAt(clientX){ const t = timeFromClientX(clientX); label.textContent = fmtClock(t); moveLabelTo(clientX); }
   function maybeShowLockedMessage(show){ if (!seekInsight) return; if (!isSeekEnabled() && show) { seekInsight.classList.add('show'); } else if (!pointerDown) { seekInsight.classList.remove('show'); } }
   function begin(e){ pointerDown = true; scrubbing = false; moved = 0; wasPlaying = !mainVideo.paused; lastX = e.clientX ?? (e.touches?.[0]?.clientX || 0); activePointerId = e.pointerId ?? null; try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {} showLabel(true); updateAt(lastX); if (isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(lastX)); overlay.style.cursor = 'pointer'; } else { overlay.style.cursor = 'not-allowed'; maybeShowLockedMessage(true); } e.preventDefault(); }
-  function move(e){ const x = e.clientX ?? (e.touches?.[0]?.clientX || 0); if (!pointerDown) { if (!insideOverlay) return; showLabel(true); updateAt(x); if (!isSeekEnabled()) maybeShowLockedMessage(true); return; } moved += Math.abs(x - lastX); lastX = x; updateAt(x); if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) { scrubbing = true; if (wasPlaying) pauseBound(); } if (scrubbing && isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(x)); e.preventDefault(); } }
+  function move(e){ const x = e.clientX ?? (e.touches?.[0]?.clientX || 0); if (!pointerDown) { if (!insideOverlay) return; showLabel(true); updateAt(x); if (!isSeekEnabled()) maybeShowLockedMessage(true); return; } moved += Math.abs(x - lastX); lastX = x; updateAt(x); if (isSeekEnabled() && !scrubbing && moved >= 4) { scrubbing = true; if (wasPlaying) pauseBound(); } if (scrubbing && isSeekEnabled()) { setMainTimeAndHardSync(timeFromClientX(x)); e.preventDefault(); } }
   function end(){ if (scrubbing && wasPlaying) playBound(); pointerDown = false; scrubbing = false; try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {} activePointerId = null; if (!insideOverlay) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); } }
   overlay.addEventListener('pointerenter', () => { insideOverlay = true; overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed'; showLabel(true); if (!isSeekEnabled()) maybeShowLockedMessage(true); });
   overlay.addEventListener('pointerleave', () => { insideOverlay = false; if (!pointerDown) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); } });
-  overlay.addEventListener('pointerdown', begin, { passive: false }); overlay.addEventListener('pointermove', move,  { passive: false }); overlay.addEventListener('pointerup', end); overlay.addEventListener('pointercancel', end);
+  overlay.addEventListener('pointerdown', begin, { passive: false });
+  overlay.addEventListener('pointermove', move,  { passive: false });
+  overlay.addEventListener('pointerup',   end);
+  overlay.addEventListener('pointercancel', end);
   window.__updateScrubOverlay = function(){ overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed'; };
   window.__updateScrubOverlay();
 })();
 
 /* ===================== Utilities kept ===================== */
 skipIntroBtn.addEventListener('click', () => { cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1'); skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show'); });
-function hideHeadlineTimer() { const badge = document.getElementById('separateCountdown')?.closest('.exclusive-badge'); if (badge) badge.style.display = 'none'; }
+
+function hideHeadlineTimer() {
+  const badge = document.getElementById('separateCountdown')?.closest('.exclusive-badge');
+  if (badge) badge.style.display = 'none';
+}

@@ -1,21 +1,16 @@
 /* =====================================================
-  app.js — Viewer (drag/hover fix + config end-cam delay)
+  app.js — Viewer (drag/hover ok + mobile scroll + PIN fixes)
 
-  What changed in this build:
-  - Scrub/drag now works on desktop + mobile via a fixed-position pointer overlay
-    that always tracks the progress bar bounds.
-  - Time label appears on simple hover (desktop) — no click required.
-  - Added direct progress-bar listeners as a fallback for quirky mobile webviews.
-  - Exposed window.__updateScrubOverlayRect() to re-measure overlay hitbox
-    whenever layout changes (end screen, replay, resize, fullscreen, etc.).
-  - Added END_CAM config: keep primary webcam paused at end, then fade into
-    end-cam after a configurable delay (ms).
-  - Fixed accidental code injection in injectHighlights (now safely wraps matches).
-  - Removed stray "$1" token that could break parsing.
-  - Longer swallowClick window (250ms) to suppress synthetic taps after drag.
-  - Higher z-index + overscrollBehavior containment for overlay on mobile.
-
-  All previous behavior preserved unless noted.
+  This build ONLY touches behavior — visuals unchanged.
+  What’s new:
+  - Mobile page scroll enabled (pairs with CSS you pasted).
+  - Scrub overlay allows vertical scroll (touchAction: pan-y) and only
+    prevents default while actually scrubbing.
+  - Hover time label still shows on desktop hover.
+  - PIN overlay: no more freezing after wrong PIN; deletion is correct;
+    numbers are not reversed; re‑entry works; overlay recenters when the
+    keyboard opens on mobile.
+  - END_CAM delay remains configurable via END_CAM.DELAY_MS.
 ===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
@@ -116,12 +111,9 @@ const MUSIC = {
   PRIME_ON_UNMUTE: true
 };
 
-// ======== NEW: End-cam behavior (tunable) ========
+// ======== End-cam behavior (tunable) ========
 const END_CAM = {
-  // How long to keep the primary webcam frozen on its last frame
-  // after the main video ends, before fading to the end-cam clip (ms)
-  DELAY_MS: 2500,
-  // How long the fade from primary webcam → end-cam should last (ms)
+  DELAY_MS: 2500, // keep primary webcam frozen at end before fading to end-cam
   FADE_MS: 450
 };
 
@@ -381,7 +373,7 @@ function injectHighlights(resolvedText, highlightsExpanded) {
   (highlightsExpanded || []).forEach(h => {
     const safe = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const rx = new RegExp(`(\\b${safe}\\b)`, 'ig');
-    html = html.replace(rx, '<span class="ink ink--hot">$1<\/span>');
+    html = html.replace(rx, '<span class="ink ink--hot">$1</span>');
   });
   return html;
 }
@@ -400,9 +392,9 @@ function showNotFound() {
   if (sceneGoal) sceneGoal.classList.add('hidden');
   if (sceneRecorded) {
     const h2 = sceneRecorded.querySelector('.subbig');
-    if (h2) h2.innerHTML = `This presentation <span class="ink ink--hot">doesn’t<\/span> exist for this link.`;
+    if (h2) h2.innerHTML = `This presentation <span class="ink ink--hot">doesn’t</span> exist for this link.`;
     const note = sceneRecorded.querySelector('.note');
-    if (note) note.innerHTML = `Try the <a href="/" class="ink ink--hot">link<\/a> we sent again.`;
+    if (note) note.innerHTML = `Try the <a href="/" class="ink ink--hot">link</a> we sent again.`;
     sceneRecorded.classList.remove('hidden');
     sceneRecorded.classList.add('fade-in');
   }
@@ -629,7 +621,6 @@ async function hydrateFromCloud() {
       } catch { }
     }
 
-    console.debug('[media] candidates:', { slidesCandidates, webcamCandidates, handCandidates });
     console.debug('[media] resolved:', { slidesUrl, webcamUrl, handUrl });
 
     const baseCTA = pres?.cta || {};
@@ -762,13 +753,9 @@ function showStage() {
   skipIntroBtn.classList.add('hidden');
   try { mainVideo.play().catch(() => { }); } catch { }
   enterNormalMode();
-  // Start main music softly
   if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} }
   stabilizeIntrigue(800);
-
-  // Defer timeline hover/drag overlay until stage visible (prevents intercepting PIN touches)
   if (!_hoverLabelInited) { initHoverTimeLabel(); _hoverLabelInited = true; }
-  // remeasure overlay once layout settles
   setTimeout(() => { window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, 80);
 }
 
@@ -830,12 +817,9 @@ const ro = new ResizeObserver(() => {
 if (nav) ro.observe(nav);
 if (playerEl) ro.observe(playerEl);
 
-defaultFullscreenListeners();
-function defaultFullscreenListeners(){
-  ['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(evt=>{
-    document.addEventListener(evt, ()=>{ window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, {passive:true});
-  });
-}
+['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(evt=>{
+  document.addEventListener(evt, ()=>{ window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, {passive:true});
+});
 
 function runSequence() {
   introActive = true;
@@ -975,7 +959,7 @@ function maybeRevertUnauthorizedSeek() { const nowPerf = performance.now(); if (
 mainVideo.addEventListener('seeking', () => { maybeRevertUnauthorizedSeek(); });
 mainVideo.addEventListener('seeked', () => { syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); });
 
-// Legacy click/touch seek on the bar (kept for accessibility)
+// Legacy click seek on the bar (kept for accessibility)
 function seekFromEvent(e) {
   if (swallowClick) { swallowClick = false; return; }
   if (!isSeekEnabled()) return;
@@ -988,7 +972,6 @@ function seekFromEvent(e) {
   setMainTimeAndHardSync(newTime);
 }
 progress.addEventListener('click', seekFromEvent);
-// Touchstart seek is now handled by the high-z overlay + direct fallbacks.
 
 document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
 
@@ -1069,7 +1052,6 @@ function setupFullscreenButton() {
     } else {
       ensureWebcamInsideFrameForFS();
     }
-    // Make sure orbit button remains positioned
     setTimeout(() => positionOrbitOnRim(315), 60);
     setTimeout(() => window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(), 60);
   }
@@ -1114,10 +1096,9 @@ function hideEndUI() {
   setTimeout(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, 50);
 }
 
-// NEW: Fade primary webcam → end-cam after END_CAM.DELAY_MS
+// Fade primary webcam → end-cam after END_CAM.DELAY_MS
 function scheduleEndCamFade() {
   clearEndCrossfadeTimer();
-  // ensure starting state: primary webcam visible (paused), end-cam hidden
   try { webcamVideo.pause(); } catch {}
   try { webcamVideo2.pause(); } catch {}
   webcamVideo.style.transition = 'opacity 0ms linear';
@@ -1152,16 +1133,12 @@ mainVideo.addEventListener('ended', async () => {
     return;
   }
   maybeUnlockSeekOnEnd();
-  // If we’re in fullscreen, exit first so the offer shows in normal orientation/layout
-  if (isFullscreenActive()) {
-    await exitFullscreen();
-  }
+  if (isFullscreenActive()) { await exitFullscreen(); }
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
   navTimer?.classList.add('hide');
   slideWebcamUpSmall();
   showEndUI();
-  // keep the primary webcam visible (paused), then fade to end-cam after delay
   scheduleEndCamFade();
 });
 function isEndClipActive() { return isInEndMode && parseFloat(getComputedStyle(webcamVideo2).opacity || '0') > 0.5; }
@@ -1190,7 +1167,6 @@ function replayMain() {
 orbitReplay.addEventListener('click', replayMain);
 function maybeUnlockSeekOnEnd() { if (unmutedSessionStartedAtZero && !mainVideo.muted) { seekUnlocked = true; localStorage.setItem(STORAGE_KEY_UNLOCK, '1'); applySeekLockUI(); } }
 
-// CTA buttons (kept)
 document.getElementById('ctaSession')?.addEventListener('click', () => { window.open('https://calendly.com/rnq/30min', '_blank', 'noopener'); });
 document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('Record a quick reply clicked'); });
 function goToEndNow() {
@@ -1204,22 +1180,20 @@ function goToEndNow() {
 
   slideWebcamUpSmall();
   showEndUI();
-  // use same delayed fade logic when manually skipping
   scheduleEndCamFade();
 }
 
 /* ===================== Seamless marquee (kept) ===================== */
 (function setupMarquee() { if (!brandTrack) return; const container = brandTrack.parentElement; const baseItems = Array.from(brandTrack.children).map(n => n.cloneNode(true)); function ensureFill() { brandTrack.innerHTML = ''; baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); while (brandTrack.scrollWidth < container.clientWidth * 2) { baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } baseItems.forEach(n => brandTrack.appendChild(n.cloneNode(true))); } ensureFill(); const PX_PER_SEC = 120; const setDur = () => { const totalWidth = brandTrack.scrollWidth; const dur = (totalWidth / 2) / PX_PER_SEC; brandTrack.style.animationDuration = `${dur}s`; }; setDur(); let rAF = null; window.addEventListener('resize', () => { if (rAF) cancelAnimationFrame(rAF); rAF = requestAnimationFrame(() => { ensureFill(); setDur(); positionIntrigueBetween(); }); }); })();
 
-/* ===================== PIN overlay logic (now waits for hydration) ===================== */
+/* ===================== PIN overlay logic (hydration-aware, mobile-safe) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
   const pinError = document.getElementById('pinError');
-  const digits = [];
-  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
+  const cells = Array.from(pinBoxes?.querySelectorAll('.pin-digit') || []);
 
-  // Mobile-friendly hidden input (1×1 offscreen, not 0×0)
+  // Hidden numeric input (1×1 offscreen) — single source of truth
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
@@ -1227,62 +1201,87 @@ function goToEndNow() {
   pinInput.autocomplete = 'one-time-code';
   pinInput.maxLength = 4;
   Object.assign(pinInput.style, {
-    position: 'absolute',
-    left: '-9999px',
-    top: '0',
-    width: '1px',
-    height: '1px',
-    opacity: '0'
+    position: 'absolute', left: '-9999px', top: '0', width: '1px', height: '1px', opacity: '0'
   });
-  pinOverlay.appendChild(pinInput);
+  pinOverlay?.appendChild(pinInput);
 
-  function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); } catch { } }, 0); }
-  pinOverlay.addEventListener('click', focusPinInputSoon);
-  pinOverlay.addEventListener('touchstart', focusPinInputSoon, { passive: true });
+  // Visual render strictly mirrors pinInput.value
+  function renderFromValue() {
+    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
+    if (pinInput.value !== v) pinInput.value = v; // sanitize
+    cells.forEach((c, i) => {
+      const filled = i < v.length;
+      c.classList.toggle('filled', filled);
+      c.textContent = filled ? '•' : '';
+    });
+    return v;
+  }
+  function flashError() {
+    pinError?.classList.add('show');
+    cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); });
+    setTimeout(() => pinError?.classList.remove('show'), 1400);
+  }
+  function clearForRetry() {
+    pinInput.disabled = false;
+    pinInput.value = '';
+    renderFromValue();
+    focusSoon();
+  }
+  function slideOutOverlay() { if (!pinOverlay) return; pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
 
-  function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); }
-  function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); }
-  function clearDigits() { digits.length = 0; render(); }
-  function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
-  function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
+  // Center the PIN block when keyboard opens (mobile)
+  function centerPin() {
+    try {
+      if (!pinOverlay || !pinBoxes) return;
+      const vv = window.visualViewport;
+      const rect = pinBoxes.getBoundingClientRect();
+      const vh = vv ? vv.height : window.innerHeight;
+      const targetY = (rect.top + rect.bottom) / 2;
+      const scrollY = (vv ? vv.pageTop : window.scrollY) + Math.max(0, targetY - vh / 2);
+      window.scrollTo({ top: scrollY, behavior: 'smooth' });
+    } catch {}
+  }
+  const focusSoon = () => setTimeout(() => { try { pinInput.focus(); } catch {} }, 0);
+  pinOverlay?.addEventListener('click', () => { focusSoon(); centerPin(); });
+  pinOverlay?.addEventListener('touchstart', () => { focusSoon(); centerPin(); }, { passive: true });
+  pinInput.addEventListener('focus', () => centerPin());
+  if (window.visualViewport) {
+    visualViewport.addEventListener('resize', () => { if (document.body.contains(pinInput)) centerPin(); });
+    visualViewport.addEventListener('scroll', () => { if (document.body.contains(pinInput)) centerPin(); });
+  }
 
-  // Only validate AFTER hydration so PIN_EXPECTED is correct on first try
+  // Hydration awareness
   let hydratedOnce = false;
   HYDRATE_DONE.then(() => { hydratedOnce = true; });
 
   function validateNow() {
-    if (!hydratedOnce) return; // wait for hydrate
+    const v = renderFromValue();
     if (!PIN_REQUIRED) { onPass(); return; }
-    if (digits.length !== 4) return;
-    const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) { onPass(); }
-    else { flashError(); setTimeout(() => { clearDigits(); focusPinInputSoon(); }, 180); }
+    if (v.length !== 4) return;
+    if (!hydratedOnce) { HYDRATE_DONE.then(() => validateNow()); return; }
+    if (String(v) === String(PIN_EXPECTED)) { onPass(); }
+    else { flashError(); setTimeout(clearForRetry, 180); }
   }
   async function onPass() {
     slideOutOverlay();
-    try { pinInput.blur(); } catch { }
-    await HYDRATE_DONE; // ensure data is ready
+    try { pinInput.blur(); } catch {}
+    await HYDRATE_DONE;
     if (HYDR.notFound) { showNotFound(); return; }
     runSequence();
   }
 
-  pinInput.addEventListener('input', () => {
-    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
-    digits.length = 0;
-    for (const ch of v) digits.push(ch);
-    render();
-    if (digits.length === 4) validateNow();
+  // All input flows funnel through here (prevents reverse/dup bugs)
+  pinInput.addEventListener('input', () => { renderFromValue(); if (pinInput.value.length === 4) validateNow(); });
+  pinInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); validateNow(); }
+    // Let Backspace/Delete work natively; render will mirror
   });
 
-  function onKey(e) {
-    if (!pinOverlay || pinOverlay.style.display === 'none') return;
-    const k = e.key;
-    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) validateNow(); } e.preventDefault(); return; }
-    if (k === 'Backspace' || k === 'Delete') { if (digits.length > 0) { digits.pop(); render(); playPinSound(); } e.preventDefault(); return; }
-  }
-  document.addEventListener('keydown', onKey, true);
-  render();
-  focusPinInputSoon();
+  // Remove global keydown path — avoids double-appending digits
+  // (Intentionally NOT adding a document-level key listener.)
+
+  renderFromValue();
+  focusSoon();
 
   (async function waitForPinDecision() {
     await HYDRATE_DONE;
@@ -1407,8 +1406,8 @@ setupGoToEndButton();
 function initHoverTimeLabel(){
   if (!progress || !mainVideo) return;
 
-  // Ensure the bar itself never steals the touch gesture
-  try { progress.style.touchAction = 'none'; } catch {}
+  // Allow vertical page scroll; we'll only block while actively scrubbing
+  try { progress.style.touchAction = 'pan-y'; } catch {}
 
   const HITBOX_PAD = 16;     // easier finger grab without layout shift
   const SCRUB_START_PX = 4;  // start scrubbing only after a small move
@@ -1435,20 +1434,15 @@ function initHoverTimeLabel(){
     return ratio * duration();
   };
 
-  // High z-index, fixed-position hitbox so iOS/Android send pointer/touch moves to us
   const overlay = document.createElement('div');
   Object.assign(overlay.style, {
-    position: 'fixed',
-    left: '0px', top: '0px', width: '0px', height: '0px',
-    pointerEvents: 'auto',
-    background: 'transparent',
-    zIndex: '100000',
-    touchAction: 'none',   // critical for mobile dragging
+    position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px',
+    pointerEvents: 'auto', background: 'transparent', zIndex: '100000',
+    touchAction: 'pan-y', // key change: allow vertical scroll
     overscrollBehavior: 'contain'
   });
   document.body.appendChild(overlay);
 
-  // Floating time label
   const label = document.createElement('div');
   Object.assign(label.style, {
     position: 'fixed', left: '0px', top: '0px', transform: 'translateX(-50%)',
@@ -1478,7 +1472,7 @@ function initHoverTimeLabel(){
   placeOverlay();
   window.addEventListener('resize', placeOverlay);
   window.__updateScrubOverlayRect = placeOverlay;
-  window.addEventListener('scroll', placeOverlay, true); // capture any scroller
+  window.addEventListener('scroll', placeOverlay, true);
   if (window.visualViewport) {
     visualViewport.addEventListener('resize', placeOverlay);
     visualViewport.addEventListener('scroll', placeOverlay);
@@ -1520,13 +1514,8 @@ function initHoverTimeLabel(){
     try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {}
     showLabel(true);
     updateAt(lastX);
-    if (isSeekEnabled()) {
-      setMainTimeAndHardSync(timeFromClientX(lastX));
-      overlay.style.cursor = 'pointer';
-    } else {
-      overlay.style.cursor = 'not-allowed';
-      maybeShowLockedMessage(true);
-    }
+    overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
+    if (!isSeekEnabled()) maybeShowLockedMessage(true);
   }
 
   function moveAt(x){
@@ -1553,7 +1542,6 @@ function initHoverTimeLabel(){
     if (scrubbing && wasPlaying) playBound();
     pointerDown = false;
     scrubbing = false;
-    // Prevent the synthetic click that mobile fires after a drag
     swallowClick = true; setTimeout(() => { swallowClick = false; }, 250);
     try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {}
     activePointerId = null;
@@ -1563,7 +1551,7 @@ function initHoverTimeLabel(){
     }
   }
 
-  // Pointer events path (modern mobile + desktop)
+  // Pointer events path (do NOT prevent default unless scrubbing)
   overlay.addEventListener('pointerenter', () => {
     insideOverlay = true;
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
@@ -1577,42 +1565,28 @@ function initHoverTimeLabel(){
   overlay.addEventListener('pointerdown', (e) => {
     activePointerId = e.pointerId ?? null;
     beginAt(e.clientX);
-    e.preventDefault();
-  }, { passive: false });
+    // no preventDefault here → allow vertical scrolling if they pan Y
+  }, { passive: true });
   overlay.addEventListener('pointermove', (e) => {
     moveAt(e.clientX);
-    if (pointerDown) e.preventDefault();
+    if (pointerDown && scrubbing) e.preventDefault();
   }, { passive: false });
   overlay.addEventListener('pointerup', () => { endScrub(); });
   overlay.addEventListener('pointercancel', () => { endScrub(); });
 
-  // Touch fallback (some Android WebViews / odd iOS cases)
-  overlay.addEventListener('touchstart', (e) => {
-    const x = e.touches && e.touches[0] ? e.touches[0].clientX : 0;
-    beginAt(x);
-    e.preventDefault();
-  }, { passive: false });
-  overlay.addEventListener('touchmove', (e) => {
-    const x = e.touches && e.touches[0] ? e.touches[0].clientX : 0;
-    moveAt(x);
-    if (pointerDown) e.preventDefault();
-  }, { passive: false });
-  overlay.addEventListener('touchend', () => { endScrub(); });
-  overlay.addEventListener('touchcancel', () => { endScrub(); });
-
-  // Direct progress-bar fallback (helps on some iOS/Android builds)
-  progress.addEventListener('pointerdown', (e) => { beginAt(e.clientX); e.preventDefault(); }, { passive: false });
-  progress.addEventListener('pointermove', (e) => { moveAt(e.clientX); if (pointerDown) e.preventDefault(); }, { passive: false });
-  progress.addEventListener('pointerup', () => { endScrub(); });
-  progress.addEventListener('pointercancel', () => { endScrub(); });
-  progress.addEventListener('touchstart', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; beginAt(x); e.preventDefault(); }, { passive: false });
-  progress.addEventListener('touchmove', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; moveAt(x); if (pointerDown) e.preventDefault(); }, { passive: false });
+  // Touch fallback on the bar itself (keeps scroll free until scrubbing)
+  progress.addEventListener('touchstart', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; beginAt(x); }, { passive: true });
+  progress.addEventListener('touchmove', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; moveAt(x); if (pointerDown && scrubbing) e.preventDefault(); }, { passive: false });
   progress.addEventListener('touchend', () => { endScrub(); });
   progress.addEventListener('touchcancel', () => { endScrub(); });
 
-  window.__updateScrubOverlay = function(){
-    overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
-  };
+  // Pointer fallback on the bar
+  progress.addEventListener('pointerdown', (e) => { beginAt(e.clientX); }, { passive: true });
+  progress.addEventListener('pointermove', (e) => { moveAt(e.clientX); if (pointerDown && scrubbing) e.preventDefault(); }, { passive: false });
+  progress.addEventListener('pointerup', () => { endScrub(); });
+  progress.addEventListener('pointercancel', () => { endScrub(); });
+
+  window.__updateScrubOverlay = function(){ overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed'; };
   window.__updateScrubOverlay();
 }
 

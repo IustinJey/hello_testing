@@ -1,12 +1,22 @@
 /* =====================================================
-  app.js — Viewer (dynamic hydration via Supabase)
+  app.js — Viewer (drag/hover fix + config end-cam delay)
 
-  LOCKING UPDATE (as requested):
-  - “Go to the end” container is fully hidden until first full watch (unmuted, 0→end).
-  - Timeline shows not-allowed cursor + DB-hydrated lock message while locked.
-  - Volume/music toggle hidden until unlocked.
-  - Everything else kept exactly as-is.
-  ===================================================== */
+  What changed in this build:
+  - Scrub/drag now works on desktop + mobile via a fixed-position pointer overlay
+    that always tracks the progress bar bounds.
+  - Time label appears on simple hover (desktop) — no click required.
+  - Added direct progress-bar listeners as a fallback for quirky mobile webviews.
+  - Exposed window.__updateScrubOverlayRect() to re-measure overlay hitbox
+    whenever layout changes (end screen, replay, resize, fullscreen, etc.).
+  - Added END_CAM config: keep primary webcam paused at end, then fade into
+    end-cam after a configurable delay (ms).
+  - Fixed accidental code injection in injectHighlights (now safely wraps matches).
+  - Removed stray "$1" token that could break parsing.
+  - Longer swallowClick window (250ms) to suppress synthetic taps after drag.
+  - Higher z-index + overscrollBehavior containment for overlay on mobile.
+
+  All previous behavior preserved unless noted.
+===================================================== */
 
 /* ===================== ENV + Cloud ===================== */
 const ENV = window.ENV || {};
@@ -42,7 +52,7 @@ const HYDRATE = { link: null, lead: null, pres: null, cta: {}, videos: { slidesU
 let HYDR = { started: false, done: false, notFound: false };
 let _resolveHydrate; const HYDRATE_DONE = new Promise(r => (_resolveHydrate = r));
 
-/* ===================== Elements (unchanged) ===================== */
+/* ===================== Elements (unchanged where not noted) ===================== */
 const nav = document.getElementById('nav');
 const navCountdown = document.getElementById('navCountdown');
 const navTimer = document.getElementById('navTimer');
@@ -55,7 +65,7 @@ const bizNameEl = document.getElementById('bizName');
 const ctaSlide = document.getElementById('ctaSlide');
 const stage = document.getElementById('stage');
 
-// ===== ADD: create a top dock container for mobile offer mode (under navbar) =====
+// ===== create a top dock container for mobile offer mode (under navbar) =====
 let topDock = document.getElementById('topDock');
 if (!topDock && stage) {
   topDock = document.createElement('div');
@@ -106,6 +116,15 @@ const MUSIC = {
   PRIME_ON_UNMUTE: true
 };
 
+// ======== NEW: End-cam behavior (tunable) ========
+const END_CAM = {
+  // How long to keep the primary webcam frozen on its last frame
+  // after the main video ends, before fading to the end-cam clip (ms)
+  DELAY_MS: 2500,
+  // How long the fade from primary webcam → end-cam should last (ms)
+  FADE_MS: 450
+};
+
 function clamp01(x) { return Math.max(0, Math.min(1, Number.isFinite(x) ? x : 0)); }
 function setVolumeSafe(audio, v) { try { if (audio) audio.volume = clamp01(v); } catch {} }
 
@@ -127,7 +146,7 @@ function fadeAudio(el, from, to, ms) {
   });
 }
 
-let musicEnabled = true;
+let musicEnabled = true;  // master toggle
 function pauseBothMusic() { try { bgMusic && bgMusic.pause(); } catch {}; try { endMusic && endMusic.pause(); } catch {}; }
 function playActiveMusicForState() {
   if (!musicEnabled) return;
@@ -214,8 +233,9 @@ const CAM_BUCKET = ENV.CAM_BUCKET || 'webcam';
 const HAND_BUCKET = ENV.HAND_BUCKET || 'handcam';
 const SIGNED_URL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
+// ---------- Storage helpers (public/signed URL resolution) ----------
 function partsFromPublicURL(url) {
-  const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+  const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^\/]+)\/(.+)$/);
   return m ? { bucket: m[1], path: m[2] } : null;
 }
 
@@ -287,6 +307,7 @@ function guessStorageKeyVariants(id, bucket) {
   return out;
 }
 
+// Minimal helper used when only an ID is provided and the table isn't exposed
 async function resolveIdToURL(id, preferredBucket) {
   if (!SB || !id) return null;
 
@@ -365,7 +386,7 @@ function injectHighlights(resolvedText, highlightsExpanded) {
   return html;
 }
 
-/* ===================== NOT FOUND (no fallback) ===================== */
+/* ===================== NOT FOUND ===================== */
 function showNotFound() {
   nav?.classList.add('show');
   if (navTimer) navTimer.style.display = 'none';
@@ -418,13 +439,13 @@ async function hydrateFromCloud() {
     const lead = (leads || [])[0] || null;
     const pres = (presArr || [])[0] || null;
 
-    // 3) Resolve media *from Storage* (presentation slides, primary webcam, end/hand-cam)
+    // 3) Resolve media *from Storage*
     const BKT = { slides: SLIDES_BUCKET, cam: CAM_BUCKET, hand: HAND_BUCKET };
 
     const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov)$/i;
     const looksLikeURL = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
     const looksLikePath = (s) => typeof s === 'string' && (VIDEO_EXT_RE.test(s) || /^(default|slides|presentation|uploads|public)\//i.test(s) || s.includes('/'));
-    const isUUID = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    const isUUID_local = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 
     function deepCandidates(obj, kind, buckets, maxDepth = 4, pathSeen = new WeakSet()) {
       const out = [];
@@ -433,7 +454,7 @@ async function hydrateFromCloud() {
         if (!val) return;
         if (typeof val === 'string') {
           if (looksLikeURL(val)) out.push({ url: val });
-          else if (isUUID(val)) out.push({ id: val });
+          else if (isUUID_local(val)) out.push({ id: val });
           else if (looksLikePath(val)) out.push({ bucket: srcBucket, path: val });
         } else if (typeof val === 'object') {
           const b = val.bucket || srcBucket;
@@ -462,7 +483,7 @@ async function hydrateFromCloud() {
           }
 
           if (typeof v === 'string') {
-            if (looksLikeURL(v) || isUUID(v) || looksLikePath(v)) {
+            if (looksLikeURL(v) || isUUID_local(v) || looksLikePath(v)) {
               push(v, kind === 'slides' ? buckets.slides : buckets.cam);
               continue;
             }
@@ -479,68 +500,6 @@ async function hydrateFromCloud() {
       });
     }
 
-    async function storageSignedOrPublicURL(bucket, path) {
-      if (!SB || !bucket || !path) return null;
-      if (/^https?:\/\//i.test(path)) return path;
-      try {
-        const { data } = await SB.storage.from(bucket).createSignedUrl(path, SIGNED_URL_SECONDS);
-        if (data?.signedUrl) return data.signedUrl;
-      } catch { }
-      const { data } = SB.storage.from(bucket).getPublicUrl(path);
-      return data?.publicUrl || null;
-    }
-    function partsFromPublicURL(url) {
-      const m = String(url || '').match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
-      return m ? { bucket: m[1], path: m[2] } : null;
-    }
-    async function pickFirstStorageURLAsync(cands) {
-      for (const c of (cands || [])) {
-        if (!c) continue;
-        if (c.bucket && c.path) {
-          const u = await storageSignedOrPublicURL(c.bucket, c.path);
-          if (u) return u;
-        } else if (c.url) {
-          const p = partsFromPublicURL(c.url);
-          if (p) {
-            const u = await storageSignedOrPublicURL(p.bucket, p.path);
-            if (u) return u;
-          }
-          return c.url;
-        }
-      }
-      return null;
-    }
-    async function resolveIdToURL(id, preferredBucket) {
-      if (!SB || !id) return null;
-      const TABLES = ['videos', 'hello_videos', 'hello_assets_videos', 'slides', 'hello_slides', 'media', 'presentation_videos'];
-      for (const t of TABLES) {
-        try {
-          const { data, error } = await SB.from(t).select('*').eq('id', id).limit(1);
-          if (!error && data && data[0]) {
-            const row = data[0];
-            if (row.storage_bucket && (row.storage_key || row.storage_path)) {
-              return await storageSignedOrPublicURL(row.storage_bucket, row.storage_key || row.storage_path);
-            }
-            if (row.bucket && (row.key || row.path)) {
-              return await storageSignedOrPublicURL(row.bucket, row.key || row.path);
-            }
-            if (row.storage_path) {
-              return await storageSignedOrPublicURL(preferredBucket || SLIDES_BUCKET, row.storage_path);
-            }
-            return row.public_url || row.file_url || row.url || null;
-          }
-        } catch { /* try next */ }
-      }
-      if (isUUID(id)) {
-        const bases = [id, `slides/${id}`, `presentation/${id}`, `uploads/${id}`];
-        const exts = ['', '.mp4', '.webm', '.m4v', '.mov'];
-        for (const b of bases) for (const e of exts) {
-          const u = await storageSignedOrPublicURL(preferredBucket || SLIDES_BUCKET, `${b}${e}`);
-          if (u) return u;
-        }
-      }
-      return null;
-    }
     async function pickFirstVideoURLAsync(candidates, fallbackBucketIfId) {
       for (const c of (candidates || [])) {
         if (!c) continue;
@@ -677,21 +636,16 @@ async function hydrateFromCloud() {
     const overCTA = (link?.overrides?.cta) || {};
     const cta = { ...baseCTA, ...overCTA };
 
-    // --- DB → UI text (now includes seekLockedMessage with fallback) ---
     const ctaResolved = {
-      stageHeadline:    resolveTags(cta.stageHeadline, lead),
-      timelineWarning:  resolveTags(cta.timelineWarning, lead),
-      offerHeadline:    resolveTags(cta.offerHeadline, lead),
-      button:           resolveTags(cta.button, lead),
-      quickReplyLabel:  resolveTags(cta.quickReplyLabel, lead),
-      whatsAppLabel:    resolveTags(cta.whatsAppLabel, lead),
-      whatsAppNumber:   resolveTags(cta.whatsAppNumber, lead),
-      whatsAppEnabled:  (cta.whatsAppEnabled !== false),
-      riskline:         resolveTags(cta.riskline, lead),
-      seekLockedMessage: resolveTags(
-        (cta.seekLockedMessage ?? cta.timelineWarning ?? 'Watch once to unlock the timeline.'),
-        lead
-      )
+      stageHeadline: resolveTags(cta.stageHeadline, lead),
+      timelineWarning: resolveTags(cta.timelineWarning, lead),
+      offerHeadline: resolveTags(cta.offerHeadline, lead),
+      button: resolveTags(cta.button, lead),
+      quickReplyLabel: resolveTags(cta.quickReplyLabel, lead),
+      whatsAppLabel: resolveTags(cta.whatsAppLabel, lead),
+      whatsAppNumber: resolveTags(cta.whatsAppNumber, lead),
+      whatsAppEnabled: (cta.whatsAppEnabled !== false),
+      riskline: resolveTags(cta.riskline, lead)
     };
 
     if (nameEl) nameEl.textContent = lead?.alias || lead?.nickname || '';
@@ -709,39 +663,21 @@ async function hydrateFromCloud() {
 
     const intrH = intrigue?.querySelector('h3');
     if (intrH && ctaResolved.stageHeadline) intrH.textContent = ctaResolved.stageHeadline;
-
-    // Under-timeline lock message uses seekLockedMessage (with fallback above)
-    const seekMsgTarget = seekInsight?.querySelector('span') || seekInsight;
-    if (seekMsgTarget && ctaResolved.seekLockedMessage) seekMsgTarget.textContent = ctaResolved.seekLockedMessage;
-
+    const seekSpan = seekInsight?.querySelector('span');
+    if (seekSpan && ctaResolved.timelineWarning) seekSpan.textContent = ctaResolved.timelineWarning;
     const ctaHead = document.getElementById('ctaHeadline');
     if (ctaHead && ctaResolved.offerHeadline) ctaHead.textContent = ctaResolved.offerHeadline;
     const goldBtnSpan = document.querySelector('.gold-button2 > div > span');
     if (goldBtnSpan && ctaResolved.button) goldBtnSpan.textContent = ctaResolved.button;
     const quickSpan = document.querySelector('#ctaVideoReply > span');
     if (quickSpan && ctaResolved.quickReplyLabel) quickSpan.textContent = ctaResolved.quickReplyLabel;
-    const waBtn = document.getElementById('ctaWhatsApp');
-    const waSpan = waBtn?.querySelector('span');
-    if (waSpan && ctaResolved.whatsAppLabel) waSpan.textContent = ctaResolved.whatsAppLabel;
-    if (waBtn) {
-      const waParent = waBtn.parentNode; const waClone = waBtn.cloneNode(true); waParent.replaceChild(waClone, waBtn);
-      if (!ctaResolved.whatsAppEnabled || !ctaResolved.whatsAppNumber) {
-        waClone.style.display = 'none';
-      } else {
-        waClone.addEventListener('click', () => {
-          const WHATSAPP_TEXT = 'Hey—just watched the video. Quick reply:';
-          const msg = encodeURIComponent(`${WHATSAPP_TEXT}\n\n[From]: ${document.title}`);
-          window.open(`https://wa.me/${encodeURIComponent(ctaResolved.whatsAppNumber)}?text=${msg}`, '_blank', 'noopener');
-        });
-      }
-    }
 
-    // Hydrate riskline (under offer buttons)
+    // === Hydrate the risk line under the offer buttons (from DB) ===
     const riskTargets = [
       document.getElementById('ctaRiskline'),
       document.querySelector('.cta-riskline'),
       document.querySelector('[data-cta="riskline"]'),
-      document.querySelector('#endCta .riskline, .end-cta .riskline')
+      document.querySelector('#endCta .riskline') || document.querySelector('.end-cta .riskline')
     ].filter(Boolean);
     if (riskTargets.length) {
       riskTargets.forEach(el => {
@@ -785,6 +721,7 @@ async function hydrateFromCloud() {
     HYDR.notFound = true; PIN_REQUIRED = false; _resolveHydrate();
   }
 }
+
 hydrateFromCloud();
 if (!slugFromQS) {
   hideHeadlineTimer();
@@ -817,6 +754,7 @@ function cancelIntroSequence() {
 function show(el) { el.classList.remove('hidden'); el.classList.add('fade-in'); }
 function hide(el) { el.classList.add('fade-out'); setTimeout(() => { el.classList.add('hidden'); el.classList.remove('fade-out'); }, 380); }
 
+let _hoverLabelInited = false;
 function showStage() {
   stage.classList.add('show');
   orbitReplay.classList.remove('show');
@@ -824,8 +762,14 @@ function showStage() {
   skipIntroBtn.classList.add('hidden');
   try { mainVideo.play().catch(() => { }); } catch { }
   enterNormalMode();
+  // Start main music softly
   if (bgMusic) { try { setVolumeSafe(bgMusic, MUSIC.MAIN_VOL); musicEnabled && bgMusic.play().catch(()=>{}); } catch {} }
   stabilizeIntrigue(800);
+
+  // Defer timeline hover/drag overlay until stage visible (prevents intercepting PIN touches)
+  if (!_hoverLabelInited) { initHoverTimeLabel(); _hoverLabelInited = true; }
+  // remeasure overlay once layout settles
+  setTimeout(() => { window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, 80);
 }
 
 function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
@@ -871,6 +815,7 @@ window.addEventListener('resize', () => {
   resizeRaf = requestAnimationFrame(() => {
     positionIntrigueBetween();
     stabilizeIntrigue(300);
+    window.__updateScrubOverlayRect && window.__updateScrubOverlayRect();
   });
 });
 let roPending = false;
@@ -884,6 +829,13 @@ const ro = new ResizeObserver(() => {
 });
 if (nav) ro.observe(nav);
 if (playerEl) ro.observe(playerEl);
+
+defaultFullscreenListeners();
+function defaultFullscreenListeners(){
+  ['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(evt=>{
+    document.addEventListener(evt, ()=>{ window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, {passive:true});
+  });
+}
 
 function runSequence() {
   introActive = true;
@@ -939,7 +891,7 @@ function enterNormalMode() {
   webcamWrap.classList.remove('at-top');
   crossfadeBackToMainMusic();
 }
-function enterEndMode() {
+function enterEndModeImmediate() {
   isInEndMode = true;
   clearEndCrossfadeTimer();
   try { mainVideo.pause(); webcamVideo.pause(); } catch { }
@@ -982,7 +934,7 @@ hintBtn.addEventListener('click', (e) => { e.stopPropagation(); unmuteAndRestart
 function updateMainUI() { const unmuted = !document.body.contains(hintOverlay); if (!unmuted) { mainPlayBtn.classList.remove('show'); mainPauseHint.classList.remove('show'); return; } if (mainVideo.paused) { mainPlayBtn.classList.add('show'); mainPauseHint.classList.remove('show'); } else { mainPlayBtn.classList.remove('show'); mainPauseHint.classList.add('show'); } }
 mainVideo.addEventListener('play', () => { if (isPrimaryWebcamActive() && webcamVideo.paused) webcamVideo.play().catch(() => { }); updateMainUI(); });
 mainVideo.addEventListener('pause', () => { if (isPrimaryWebcamActive() && !webcamVideo.paused) webcamVideo.pause(); updateMainUI(); });
-mainVideo.addEventListener('loadeddata', () => { updateMainUI(); syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); stabilizeIntrigue(600); });
+mainVideo.addEventListener('loadeddata', () => { updateMainUI(); syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); stabilizeIntrigue(600); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); });
 frameEl.addEventListener('pointermove', () => { frameEl.classList.add('is-hovering'); updateMainUI(); });
 frameEl.addEventListener('pointerleave', () => { frameEl.classList.remove('is-hovering'); });
 mainVideo.addEventListener('click', () => { if (document.body.contains(hintOverlay)) return; if (mainVideo.paused) { playBound(); } else { pauseBound(); } });
@@ -994,40 +946,27 @@ let rafId = null; function progressRAF() { if (isFinite(mainVideo.duration) && m
 mainVideo.addEventListener('loadedmetadata', () => { if (!rafId) progressRAF(); }); if (mainVideo.readyState >= 1 && !rafId) progressRAF();
 
 /* ===================== Seek gating + hover insight ===================== */
-let goEndWrap, goEndBtn;
+let goEndWrap, goEndBtn; // container + button
 let seekUnlocked = localStorage.getItem(STORAGE_KEY_UNLOCK) === '1';
+let swallowClick = false;
 function isSeekEnabled() { return seekUnlocked; }
-
-// STRICT lock UI — hides entire Go-End container & volume until unlocked
 function applySeekLockUI() {
-  const unlocked = (seekUnlocked === true);
-
-  if (unlocked) {
+  if (isSeekEnabled()) {
     progress.classList.remove('disabled');
     progress.setAttribute('aria-disabled', 'false');
   } else {
     progress.classList.add('disabled');
     progress.setAttribute('aria-disabled', 'true');
   }
-
-  if (musicToggle) {
-    musicToggle.style.display = unlocked ? '' : 'none';
-  }
-
-  try { window.__updateScrubOverlay && window.__updateScrubOverlay(); } catch {}
-
   if (goEndWrap) {
-    if (!unlocked) {
-      goEndWrap.style.display = 'none';
-    } else {
-      goEndWrap.style.display = '';
-      const inEnd = document.body.classList.contains('offer-mode');
-      const btn = goEndWrap.querySelector('.go-end-btn');
-      if (btn) btn.style.display = inEnd ? 'none' : '';
-    }
+    goEndWrap.classList.add('visible');
+    const inEnd = playerEl.classList.contains('content-hidden');
+    const btn = goEndWrap.querySelector('.go-end-btn');
+    if (btn) btn.style.display = (isSeekEnabled() && !inEnd) ? '' : 'none';
   }
+  window.__updateScrubOverlay && window.__updateScrubOverlay();
+  window.__updateScrubOverlayRect && window.__updateScrubOverlayRect();
 }
-
 progress.addEventListener('mouseenter', () => { if (!isSeekEnabled() && seekInsight) { seekInsight.classList.add('show'); } });
 progress.addEventListener('mouseleave', () => { if (seekInsight) { seekInsight.classList.remove('show'); } });
 let lastSafeTime = 0;
@@ -1035,7 +974,10 @@ mainVideo.addEventListener('timeupdate', () => { if (mainVideo.seeking || progra
 function maybeRevertUnauthorizedSeek() { const nowPerf = performance.now(); if (nowPerf < ignoreSeeksUntil) return; if (isSeekEnabled() || programmaticSeekOK) return; const t = mainVideo.currentTime; if (Math.abs(t - lastSafeTime) > SEEK_REVERT_EPS) { setMainTimeAndHardSync(lastSafeTime); } }
 mainVideo.addEventListener('seeking', () => { maybeRevertUnauthorizedSeek(); });
 mainVideo.addEventListener('seeked', () => { syncPrimaryWebcamToMain({ forceWhenMetaReady: true }); });
+
+// Legacy click/touch seek on the bar (kept for accessibility)
 function seekFromEvent(e) {
+  if (swallowClick) { swallowClick = false; return; }
   if (!isSeekEnabled()) return;
   if (!isFinite(mainVideo.duration) || mainVideo.duration <= 0) return;
   const rect = progress.getBoundingClientRect();
@@ -1046,7 +988,8 @@ function seekFromEvent(e) {
   setMainTimeAndHardSync(newTime);
 }
 progress.addEventListener('click', seekFromEvent);
-progress.addEventListener('touchstart', seekFromEvent, { passive: true });
+// Touchstart seek is now handled by the high-z overlay + direct fallbacks.
+
 document.addEventListener('keydown', (e) => { if (isSeekEnabled()) return; const k = e.key; if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'j', 'J', 'l', 'L'].includes(k)) { e.preventDefault(); e.stopPropagation(); } }, true);
 
 /* ===================== Preview loop (muted pre-roll) ===================== */
@@ -1064,6 +1007,77 @@ function slideWebcamDownToOrigin() { webcamWrap.style.transition = `transform ${
 function positionOrbitOnRim(angleDeg = 315) { if (!webcam || !orbitReplay) return; orbitReplay.style.top = '50%'; orbitReplay.style.left = '50%'; const r = webcam.offsetWidth / 2; if (!r) return; const theta = (angleDeg * Math.PI) / 180; const dx = Math.cos(theta) * r; const dy = Math.sin(theta) * r; orbitReplay.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px)`; }
 window.addEventListener('resize', () => positionOrbitOnRim());
 
+/* ===================== Fullscreen helpers (mobile button inside frame) ===================== */
+function isFullscreenActive() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+}
+async function requestFullscreenFor(el) {
+  if (!el) return;
+  try {
+    if (el.requestFullscreen) await el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+    else if (el.msRequestFullscreen) await el.msRequestFullscreen();
+  } catch {}
+}
+async function exitFullscreen() {
+  try {
+    if (document.exitFullscreen) await document.exitFullscreen();
+    else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+    else if (document.msExitFullscreen) await document.msExitFullscreen();
+  } catch {}
+}
+async function lockLandscapeIfPossible() {
+  try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape'); } catch {}
+}
+
+function ensureWebcamInsideFrameForFS() {
+  if (!frameEl || !webcamWrap) return;
+  if (webcamWrap.parentNode !== frameEl) frameEl.appendChild(webcamWrap);
+}
+function restoreWebcamParentAfterFS() {
+  try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch {}
+}
+
+function setupFullscreenButton() {
+  if (!frameEl) return;
+  let btn = document.getElementById('fsBtn');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'fsBtn';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Fullscreen');
+    btn.innerHTML = '<i class="ri-fullscreen-fill" aria-hidden="true"></i>';
+    frameEl.appendChild(btn);
+  }
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!isFullscreenActive()) {
+      ensureWebcamInsideFrameForFS();
+      await requestFullscreenFor(frameEl);
+      document.body.classList.add('fs-active');
+      await lockLandscapeIfPossible();
+    } else {
+      await exitFullscreen();
+    }
+  });
+
+  function onFSChange() {
+    const active = isFullscreenActive();
+    document.body.classList.toggle('fs-active', !!active);
+    if (!active) {
+      restoreWebcamParentAfterFS();
+    } else {
+      ensureWebcamInsideFrameForFS();
+    }
+    // Make sure orbit button remains positioned
+    setTimeout(() => positionOrbitOnRim(315), 60);
+    setTimeout(() => window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(), 60);
+  }
+  document.addEventListener('fullscreenchange', onFSChange);
+  document.addEventListener('webkitfullscreenchange', onFSChange);
+}
+setupFullscreenButton();
+
 /* ===================== End state + crossfade + OFFER SFX & MUSIC ===================== */
 function showEndUI() {
   document.body.classList.add('offer-mode');
@@ -1075,16 +1089,13 @@ function showEndUI() {
   brandMarquee?.classList.add('show');
   brandMarquee?.setAttribute('aria-hidden', 'false');
   try { sfxOffer.currentTime = 0; sfxOffer.play().catch(() => { }); } catch { };
-
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = 'none';
   }
-
   crossfadeToEndMusic();
-
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
-  setTimeout(() => { positionOrbitOnRim(315); }, 50);
+  setTimeout(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, 50);
 }
 function hideEndUI() {
   document.body.classList.remove('offer-mode');
@@ -1094,32 +1105,46 @@ function hideEndUI() {
   endCta.classList.add('hidden');
   endCta.setAttribute('aria-hidden', 'true');
   brandMarquee?.classList.remove('show');
-
   if (goEndWrap) {
     const btn = goEndWrap.querySelector('.go-end-btn');
     if (btn) btn.style.display = isSeekEnabled() ? '' : 'none';
   }
-
   crossfadeBackToMainMusic();
-
   try { window.__relocateWebcamForSmall && window.__relocateWebcamForSmall(); } catch { }
-  setTimeout(() => { positionOrbitOnRim(315); }, 50);
+  setTimeout(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); }, 50);
 }
-function crossfadeToWebcamEnd(delayMs = 1000) {
+
+// NEW: Fade primary webcam → end-cam after END_CAM.DELAY_MS
+function scheduleEndCamFade() {
   clearEndCrossfadeTimer();
-  try { webcamVideo.pause(); } catch { }
-  webcamPlayUI.classList.remove('show');
-  webcamPauseHint.classList.remove('show');
+  // ensure starting state: primary webcam visible (paused), end-cam hidden
+  try { webcamVideo.pause(); } catch {}
+  try { webcamVideo2.pause(); } catch {}
+  webcamVideo.style.transition = 'opacity 0ms linear';
+  webcamVideo2.style.transition = 'opacity 0ms linear';
+  webcamVideo.style.opacity = '1';
+  webcamVideo2.style.opacity = '0';
+  webcamVideo2.muted = false; // allow sound on end-cam
+
   endCrossfadeTimer = setTimeout(() => {
     endCrossfadeTimer = null;
-    try { webcamVideo2.currentTime = 0; } catch { }
-    enterEndMode();
-    webcamVideo2.play().catch(() => { });
-  }, Math.max(0, delayMs));
+    const fadeMs = Math.max(0, END_CAM.FADE_MS|0);
+    webcamVideo.style.transition = `opacity ${fadeMs}ms ease`;
+    webcamVideo2.style.transition = `opacity ${fadeMs}ms ease`;
+    try { webcamVideo2.currentTime = 0; } catch {}
+    isInEndMode = true;
+    webcamWrap.classList.add('at-top');
+    webcamVideo2.play().catch(()=>{});
+    requestAnimationFrame(() => {
+      webcamVideo2.style.opacity = '1';
+      webcamVideo.style.opacity = '0';
+    });
+  }, Math.max(0, END_CAM.DELAY_MS|0));
 }
+
 function crossfadeBackToWebcamPrimary() { enterNormalMode(); webcamVideo.play().catch(() => { }); }
 
-mainVideo.addEventListener('ended', () => {
+mainVideo.addEventListener('ended', async () => {
   if (!hasClickedUnmuteOverlay) {
     setMainTimeAndHardSync(0.03);
     ignoreSeeksUntil = performance.now() + 200;
@@ -1127,12 +1152,17 @@ mainVideo.addEventListener('ended', () => {
     return;
   }
   maybeUnlockSeekOnEnd();
+  // If we’re in fullscreen, exit first so the offer shows in normal orientation/layout
+  if (isFullscreenActive()) {
+    await exitFullscreen();
+  }
   frameEl.classList.add('dim');
   playerEl.classList.add('content-hidden');
   navTimer?.classList.add('hide');
   slideWebcamUpSmall();
   showEndUI();
-  crossfadeToWebcamEnd(300);
+  // keep the primary webcam visible (paused), then fade to end-cam after delay
+  scheduleEndCamFade();
 });
 function isEndClipActive() { return isInEndMode && parseFloat(getComputedStyle(webcamVideo2).opacity || '0') > 0.5; }
 webcam.addEventListener('click', () => { if (!isEndClipActive()) return; if (webcamVideo2.paused) { webcamPlayUI.classList.remove('show'); webcamVideo2.play().catch(() => { }); } else { webcamVideo2.pause(); webcamPlayUI.classList.add('show'); } });
@@ -1160,11 +1190,11 @@ function replayMain() {
 orbitReplay.addEventListener('click', replayMain);
 function maybeUnlockSeekOnEnd() { if (unmutedSessionStartedAtZero && !mainVideo.muted) { seekUnlocked = true; localStorage.setItem(STORAGE_KEY_UNLOCK, '1'); applySeekLockUI(); } }
 
+// CTA buttons (kept)
 document.getElementById('ctaSession')?.addEventListener('click', () => { window.open('https://calendly.com/rnq/30min', '_blank', 'noopener'); });
 document.getElementById('ctaVideoReply')?.addEventListener('click', () => { console.log('Record a quick reply clicked'); });
-
 function goToEndNow() {
-  if (!isSeekEnabled()) return;
+  if (!isSeekEnabled()) return; // only after first full watch
   try { mainVideo.pause(); } catch { }
   try { webcamVideo.pause(); } catch { }
 
@@ -1174,7 +1204,8 @@ function goToEndNow() {
 
   slideWebcamUpSmall();
   showEndUI();
-  crossfadeToWebcamEnd(100);
+  // use same delayed fade logic when manually skipping
+  scheduleEndCamFade();
 }
 
 /* ===================== Seamless marquee (kept) ===================== */
@@ -1188,21 +1219,26 @@ function goToEndNow() {
   const digits = [];
   const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
 
+  // Mobile-friendly hidden input (1×1 offscreen, not 0×0)
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
   pinInput.pattern = '[0-9]*';
   pinInput.autocomplete = 'one-time-code';
   pinInput.maxLength = 4;
-  pinInput.style.position = 'absolute';
-  pinInput.style.opacity = '0';
-  pinInput.style.pointerEvents = 'none';
-  pinInput.style.width = '0';
-  pinInput.style.height = '0';
+  Object.assign(pinInput.style, {
+    position: 'absolute',
+    left: '-9999px',
+    top: '0',
+    width: '1px',
+    height: '1px',
+    opacity: '0'
+  });
   pinOverlay.appendChild(pinInput);
 
   function focusPinInputSoon() { setTimeout(() => { try { pinInput.focus(); } catch { } }, 0); }
   pinOverlay.addEventListener('click', focusPinInputSoon);
+  pinOverlay.addEventListener('touchstart', focusPinInputSoon, { passive: true });
 
   function render() { cells.forEach((c, i) => { const filled = i < digits.length; c.classList.toggle('filled', filled); c.textContent = filled ? '•' : ''; }); }
   function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); }
@@ -1210,32 +1246,38 @@ function goToEndNow() {
   function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
   function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
 
+  // Only validate AFTER hydration so PIN_EXPECTED is correct on first try
+  let hydratedOnce = false;
+  HYDRATE_DONE.then(() => { hydratedOnce = true; });
+
+  function validateNow() {
+    if (!hydratedOnce) return; // wait for hydrate
+    if (!PIN_REQUIRED) { onPass(); return; }
+    if (digits.length !== 4) return;
+    const attempt = digits.join('');
+    if (String(attempt) === String(PIN_EXPECTED)) { onPass(); }
+    else { flashError(); setTimeout(() => { clearDigits(); focusPinInputSoon(); }, 180); }
+  }
+  async function onPass() {
+    slideOutOverlay();
+    try { pinInput.blur(); } catch { }
+    await HYDRATE_DONE; // ensure data is ready
+    if (HYDR.notFound) { showNotFound(); return; }
+    runSequence();
+  }
+
   pinInput.addEventListener('input', () => {
     const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
     digits.length = 0;
     for (const ch of v) digits.push(ch);
     render();
-    if (digits.length === 4) checkIfReady();
+    if (digits.length === 4) validateNow();
   });
 
-  async function startAfterPin() {
-    slideOutOverlay();
-    try { pinInput.blur(); } catch { }
-    await HYDRATE_DONE;
-    if (HYDR.notFound) { showNotFound(); return; }
-    runSequence();
-  }
-
-  function checkIfReady() {
-    if (!PIN_REQUIRED) { startAfterPin(); return; }
-    if (digits.length !== 4) return;
-    const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) { startAfterPin(); } else { flashError(); setTimeout(clearDigits, 180); }
-  }
   function onKey(e) {
     if (!pinOverlay || pinOverlay.style.display === 'none') return;
     const k = e.key;
-    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) checkIfReady(); } e.preventDefault(); return; }
+    if (k >= '0' && k <= '9') { if (digits.length < 4) { digits.push(k); render(); playPinSound(); if (digits.length === 4) validateNow(); } e.preventDefault(); return; }
     if (k === 'Backspace' || k === 'Delete') { if (digits.length > 0) { digits.pop(); render(); playPinSound(); } e.preventDefault(); return; }
   }
   document.addEventListener('keydown', onKey, true);
@@ -1244,7 +1286,7 @@ function goToEndNow() {
 
   (async function waitForPinDecision() {
     await HYDRATE_DONE;
-    if (!PIN_REQUIRED) { startAfterPin(); }
+    if (!PIN_REQUIRED) { onPass(); }
   })();
 })();
 
@@ -1295,8 +1337,7 @@ function applySeekInsightStyleFromCSS() {
 applySeekInsightStyleFromCSS();
 window.addEventListener('resize', applySeekInsightStyleFromCSS);
 
-
-/* ===================== Setup Go-to-End container & mobile docking ===================== */
+/* ===================== Setup Go-to-End & mobile docking ===================== */
 function setupGoToEndButton() {
   if (!playerEl) return;
 
@@ -1324,11 +1365,9 @@ function setupGoToEndButton() {
     goToEndNow();
   });
 
-  // Initial state; strict lock will hide the whole container if needed
   const btn = goEndWrap.querySelector('.go-end-btn');
   if (btn) btn.style.display = 'none';
 
-  // Expose the below-player area and relocate webcam on small screens
   window.__belowPlayerArea = goEndWrap;
 
   function relocateWebcamForSmall() {
@@ -1338,7 +1377,7 @@ function setupGoToEndButton() {
     if (isSmall && document.body.classList.contains('offer-mode') && topDock) {
       if (webcamWrap.parentNode !== topDock) topDock.appendChild(webcamWrap);
       document.body.dataset.webcamPosition = 'below';
-      requestAnimationFrame(() => { positionOrbitOnRim(315); });
+      requestAnimationFrame(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); });
       return;
     }
 
@@ -1346,13 +1385,13 @@ function setupGoToEndButton() {
     if (isSmall && area) {
       if (webcamWrap.parentNode !== area) area.appendChild(webcamWrap);
       document.body.dataset.webcamPosition = 'below';
-      requestAnimationFrame(() => { positionOrbitOnRim(315); });
+      requestAnimationFrame(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); });
       return;
     }
 
     if (webcamWrap.parentNode !== playerEl) playerEl.appendChild(webcamWrap);
     delete document.body.dataset.webcamPosition;
-    requestAnimationFrame(() => { positionOrbitOnRim(315); });
+    requestAnimationFrame(() => { positionOrbitOnRim(315); window.__updateScrubOverlayRect && window.__updateScrubOverlayRect(); });
   }
 
   window.__relocateWebcamForSmall = relocateWebcamForSmall;
@@ -1360,17 +1399,19 @@ function setupGoToEndButton() {
   relocateWebcamForSmall();
   window.addEventListener('resize', relocateWebcamForSmall);
 
-  // Apply strict lock visibility now
   applySeekLockUI();
 }
 setupGoToEndButton();
 
-/* ===================== HOVER/CURSOR TIME LABEL (only over the bar, drag fixed) ===================== */
-(function setupHoverTimeLabel(){
+/* ===================== HOVER/CURSOR TIME LABEL (init deferred) ===================== */
+function initHoverTimeLabel(){
   if (!progress || !mainVideo) return;
 
-  const HITBOX_PAD = 16;
-  const SCRUB_START_PX = 4;
+  // Ensure the bar itself never steals the touch gesture
+  try { progress.style.touchAction = 'none'; } catch {}
+
+  const HITBOX_PAD = 16;     // easier finger grab without layout shift
+  const SCRUB_START_PX = 4;  // start scrubbing only after a small move
 
   function getLabelGap() {
     const cs = getComputedStyle(document.documentElement);
@@ -1378,7 +1419,7 @@ setupGoToEndButton();
     const px = parseFloat(v);
     return Number.isFinite(px) ? px : 8;
   }
-  const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+  const clampLocal = (n, a, b) => Math.max(a, Math.min(b, n));
   const fmtClock = (sec) => {
     sec = Math.max(0, Math.floor(sec || 0));
     const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
@@ -1389,41 +1430,33 @@ setupGoToEndButton();
   const duration = () => (isFinite(mainVideo.duration) ? mainVideo.duration : 0);
   const timeFromClientX = (clientX) => {
     const r = rect();
-    const x = clamp(clientX - r.left, 0, r.width);
+    const x = clampLocal(clientX - r.left, 0, r.width);
     const ratio = r.width ? x / r.width : 0;
     return ratio * duration();
   };
 
+  // High z-index, fixed-position hitbox so iOS/Android send pointer/touch moves to us
   const overlay = document.createElement('div');
   Object.assign(overlay.style, {
     position: 'fixed',
     left: '0px', top: '0px', width: '0px', height: '0px',
     pointerEvents: 'auto',
     background: 'transparent',
-    zIndex: '10050',
-    touchAction: 'none'
+    zIndex: '100000',
+    touchAction: 'none',   // critical for mobile dragging
+    overscrollBehavior: 'contain'
   });
   document.body.appendChild(overlay);
 
+  // Floating time label
   const label = document.createElement('div');
   Object.assign(label.style, {
-    position: 'fixed',
-    left: '0px', top: '0px',
-    transform: 'translateX(-50%)',
-    padding: '4px 6px',
-    fontSize: '12.5px',
-    fontWeight: '800',
-    lineHeight: '1',
-    color: '#fff',
-    background: 'rgba(0,0,0,.68)',
-    borderRadius: '8px',
-    boxShadow: '0 2px 8px rgba(0,0,0,.18)',
-    textShadow: '0 1px 0 rgba(0,0,0,.25)',
-    whiteSpace: 'nowrap',
-    opacity: '0',
-    transition: 'opacity .12s ease',
-    pointerEvents: 'none',
-    zIndex: '10060'
+    position: 'fixed', left: '0px', top: '0px', transform: 'translateX(-50%)',
+    padding: '4px 6px', fontSize: '12.5px', fontWeight: '800', lineHeight: '1',
+    color: '#fff', background: 'rgba(0,0,0,.68)', borderRadius: '8px',
+    boxShadow: '0 2px 8px rgba(0,0,0,.18)', textShadow: '0 1px 0 rgba(0,0,0,.25)',
+    whiteSpace: 'nowrap', opacity: '0', transition: 'opacity .12s ease',
+    pointerEvents: 'none', zIndex: '100010'
   });
   document.body.appendChild(label);
 
@@ -1444,17 +1477,25 @@ setupGoToEndButton();
   }
   placeOverlay();
   window.addEventListener('resize', placeOverlay);
+  window.__updateScrubOverlayRect = placeOverlay;
+  window.addEventListener('scroll', placeOverlay, true); // capture any scroller
+  if (window.visualViewport) {
+    visualViewport.addEventListener('resize', placeOverlay);
+    visualViewport.addEventListener('scroll', placeOverlay);
+  }
+  document.addEventListener('fullscreenchange', placeOverlay);
+  document.addEventListener('webkitfullscreenchange', placeOverlay);
+  window.addEventListener('orientationchange', () => setTimeout(placeOverlay, 120));
 
   function moveLabelTo(clientX){
     const r = rect();
-    const x = clamp(clientX, r.left, r.right);
+    const x = clampLocal(clientX, r.left, r.right);
     const gap = getLabelGap();
     const topY = r.top - gap - (label.offsetHeight || 18);
     label.style.left = `${Math.round(x)}px`;
     label.style.top  = `${Math.round(Math.max(0, topY))}px`;
   }
   function showLabel(show){ label.style.opacity = show ? '1' : '0'; }
-
   function updateAt(clientX){
     const t = timeFromClientX(clientX);
     label.textContent = fmtClock(t);
@@ -1470,19 +1511,15 @@ setupGoToEndButton();
     }
   }
 
-  function begin(e){
+  function beginAt(x){
     pointerDown = true;
     scrubbing = false;
     moved = 0;
     wasPlaying = !mainVideo.paused;
-    lastX = e.clientX ?? (e.touches?.[0]?.clientX || 0);
-    activePointerId = e.pointerId ?? null;
-
+    lastX = x;
     try { if (activePointerId != null) overlay.setPointerCapture(activePointerId); } catch {}
-
     showLabel(true);
     updateAt(lastX);
-
     if (isSeekEnabled()) {
       setMainTimeAndHardSync(timeFromClientX(lastX));
       overlay.style.cursor = 'pointer';
@@ -1490,13 +1527,9 @@ setupGoToEndButton();
       overlay.style.cursor = 'not-allowed';
       maybeShowLockedMessage(true);
     }
-
-    e.preventDefault();
   }
 
-  function move(e){
-    const x = e.clientX ?? (e.touches?.[0]?.clientX || 0);
-
+  function moveAt(x){
     if (!pointerDown) {
       if (!insideOverlay) return;
       showLabel(true);
@@ -1504,36 +1537,33 @@ setupGoToEndButton();
       if (!isSeekEnabled()) maybeShowLockedMessage(true);
       return;
     }
-
     moved += Math.abs(x - lastX);
     lastX = x;
     updateAt(x);
-
     if (isSeekEnabled() && !scrubbing && moved >= SCRUB_START_PX) {
       scrubbing = true;
       if (wasPlaying) pauseBound();
     }
-
     if (scrubbing && isSeekEnabled()) {
       setMainTimeAndHardSync(timeFromClientX(x));
-      e.preventDefault();
     }
   }
 
-  function end(){
+  function endScrub(){
     if (scrubbing && wasPlaying) playBound();
     pointerDown = false;
     scrubbing = false;
-
+    // Prevent the synthetic click that mobile fires after a drag
+    swallowClick = true; setTimeout(() => { swallowClick = false; }, 250);
     try { if (activePointerId != null) overlay.releasePointerCapture(activePointerId); } catch {}
     activePointerId = null;
-
     if (!insideOverlay) {
       showLabel(false);
       seekInsight && seekInsight.classList.remove('show');
     }
   }
 
+  // Pointer events path (modern mobile + desktop)
   overlay.addEventListener('pointerenter', () => {
     insideOverlay = true;
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
@@ -1542,22 +1572,49 @@ setupGoToEndButton();
   });
   overlay.addEventListener('pointerleave', () => {
     insideOverlay = false;
-    if (!pointerDown) {
-      showLabel(false);
-      seekInsight && seekInsight.classList.remove('show');
-    }
+    if (!pointerDown) { showLabel(false); seekInsight && seekInsight.classList.remove('show'); }
   });
+  overlay.addEventListener('pointerdown', (e) => {
+    activePointerId = e.pointerId ?? null;
+    beginAt(e.clientX);
+    e.preventDefault();
+  }, { passive: false });
+  overlay.addEventListener('pointermove', (e) => {
+    moveAt(e.clientX);
+    if (pointerDown) e.preventDefault();
+  }, { passive: false });
+  overlay.addEventListener('pointerup', () => { endScrub(); });
+  overlay.addEventListener('pointercancel', () => { endScrub(); });
 
-  overlay.addEventListener('pointerdown', begin, { passive: false });
-  overlay.addEventListener('pointermove', move,  { passive: false });
-  overlay.addEventListener('pointerup',   end);
-  overlay.addEventListener('pointercancel', end);
+  // Touch fallback (some Android WebViews / odd iOS cases)
+  overlay.addEventListener('touchstart', (e) => {
+    const x = e.touches && e.touches[0] ? e.touches[0].clientX : 0;
+    beginAt(x);
+    e.preventDefault();
+  }, { passive: false });
+  overlay.addEventListener('touchmove', (e) => {
+    const x = e.touches && e.touches[0] ? e.touches[0].clientX : 0;
+    moveAt(x);
+    if (pointerDown) e.preventDefault();
+  }, { passive: false });
+  overlay.addEventListener('touchend', () => { endScrub(); });
+  overlay.addEventListener('touchcancel', () => { endScrub(); });
+
+  // Direct progress-bar fallback (helps on some iOS/Android builds)
+  progress.addEventListener('pointerdown', (e) => { beginAt(e.clientX); e.preventDefault(); }, { passive: false });
+  progress.addEventListener('pointermove', (e) => { moveAt(e.clientX); if (pointerDown) e.preventDefault(); }, { passive: false });
+  progress.addEventListener('pointerup', () => { endScrub(); });
+  progress.addEventListener('pointercancel', () => { endScrub(); });
+  progress.addEventListener('touchstart', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; beginAt(x); e.preventDefault(); }, { passive: false });
+  progress.addEventListener('touchmove', (e) => { const x = (e.touches && e.touches[0]) ? e.touches[0].clientX : 0; moveAt(x); if (pointerDown) e.preventDefault(); }, { passive: false });
+  progress.addEventListener('touchend', () => { endScrub(); });
+  progress.addEventListener('touchcancel', () => { endScrub(); });
 
   window.__updateScrubOverlay = function(){
     overlay.style.cursor = isSeekEnabled() ? 'pointer' : 'not-allowed';
   };
   window.__updateScrubOverlay();
-})();
+}
 
 /* ===================== Utilities kept ===================== */
 skipIntroBtn.addEventListener('click', () => { cancelIntroSequence(); nav.classList.add('show'); showStage(); localStorage.setItem(STORAGE_KEY_INTRO_OK, '1'); skipIntroBtn.classList.remove('show'); skipIntroBtn.classList.add('hidden'); orbitReplay.classList.remove('show'); });

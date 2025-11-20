@@ -1,6 +1,6 @@
+
 /* ====================================================================
    RESPONSIVENESS — flexible knobs with your proven working defaults
-   (Patch: mobile scroll enabled + pin overlay centering)
    ==================================================================== */
 
 /* Hidden by default; app.js creates and inserts this just under .nav/.stage */
@@ -83,25 +83,6 @@
    Mobile rules (<=768px) — behavior you liked
    ------------------------------ */
 @media (max-width: 768px) {
-  /* ===== Let the page scroll on phones (prevents CTA overlap) ===== */
-  html, body {
-    overflow-y: auto !important;
-    overscroll-behavior-y: contain;
-  }
-
-  /* Keep the stage tall but not blocking scroll */
-  .stage {
-    min-height: 100vh;
-  }
-
-  /* Ensure progress bar + CTA never get clipped */
-  .player,
-  #frame,
-  #belowPlayerArea,
-  .go-end-wrap {
-    overflow: visible !important;
-  }
-
   /* ===== Offer mode (end screen) ===== */
   body.offer-mode .stage {
     justify-content: flex-start !important;
@@ -193,33 +174,6 @@
   }
 }
 
-/* ===== PIN overlay centering helper (when keyboard opens) ===== */
-/* Prefer dynamic viewport units so the stack stays centered above mobile keyboards */
-.pin-overlay { min-height: 100dvh; display: grid; place-items: center; }
-@supports not (min-height: 100dvh) {
-  .pin-overlay { min-height: 100vh; }
-}
-
-/* Give the stack a sane max-width so it never clips */
-.pin-overlay .pin-stack { max-width: min(560px, 94vw); }
-
-/* Fallback hook driven by JS (VisualViewport) for older mobiles) */
-:root { --pin-shift-y: 0px; }
-.pin-overlay .pin-stack { transform: translateY(var(--pin-shift-y)); transition: transform .18s ease; }
-
-/* Keep inputs tappable even when centered near the keyboard */
-.pin-overlay input[type="tel"],
-.pin-overlay input[type="number"] { font-size: 16px; } /* prevents iOS zoom */
-
-/* Responsive breathing when the keyboard is up */
-@media (max-width: 768px) {
-  .pin-overlay .pin-stack { padding: 8px 10px; }
-}
-
-/* ================= Fullscreen styles ================= */
-
-
-
 /* ================= Fullscreen styles ================= */
 /* Mobile-only button inside the frame’s corner */
 #fsBtn {
@@ -239,19 +193,42 @@
 #fsBtn i { font-size: 18px; line-height: 36px; display: inline-block; }
 @media (max-width: 768px) { #fsBtn { display: inline-flex; align-items: center; justify-content: center; } }
 
+/* When fullscreen is active, shrink & pin the webcam inside the frame */
+body.fs-active #frame .webcam-wrap {
+  position: absolute !important;
+  width: var(--fs-webcam-size) !important;
+  height: var(--fs-webcam-size) !important;
+  right: var(--fs-webcam-corner-gap) !important;
+  bottom: var(--fs-webcam-corner-gap) !important;
+  transform: none !important;
+  z-index: 10030 !important;
+}
 
 
-/* ===== Mobile: unstick the brand marquee so you can scroll to it ===== */
 @media (max-width: 768px) {
-  .brand-marquee {
-    position: static !important;
-    bottom: auto !important;
-    transform: none !important;
-    margin: 18px auto 24px;
-    opacity: 1; /* ensure visible when moved into flow */
-  }
-  .brand-marquee__inner { width: min(1100px, 94vw); }
-  /* keep a touch of spacing under CTAs so they never collide */
-  .end-cta__stack { padding-bottom: 12px; }
-  body.offer-mode .brand-marquee { position: static !important; }
+html, body { overflow-y: auto !important; overscroll-behavior-y: contain; }
+.stage { min-height: 100vh; }
+.player, #frame, #belowPlayerArea, .go-end-wrap { overflow: visible !important; }
+
+
+/* Brand marquee becomes part of normal flow (no overlap with CTAs) */
+.brand-marquee {
+position: static !important;
+bottom: auto !important;
+z-index: auto !important;
+transform: none !important;
+margin-top: 14px;
+padding: 8px 0 18px;
+}
+.brand-marquee.show { opacity: 1; transform: none !important; }
+
+
+/* PIN overlay: ensure it has some vertical room in small viewports */
+#pinOverlay { position: relative; }
+}
+
+
+/* Better viewport units on modern mobile browsers */
+@supports (height: 1dvh) {
+#pinOverlay { min-height: 60dvh; }
 }

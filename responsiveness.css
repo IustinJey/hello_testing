@@ -1,6 +1,6 @@
-
 /* ====================================================================
    RESPONSIVENESS — flexible knobs with your proven working defaults
+   (Patch: mobile scroll enabled + pin overlay centering)
    ==================================================================== */
 
 /* Hidden by default; app.js creates and inserts this just under .nav/.stage */
@@ -83,6 +83,25 @@
    Mobile rules (<=768px) — behavior you liked
    ------------------------------ */
 @media (max-width: 768px) {
+  /* ===== Let the page scroll on phones (prevents CTA overlap) ===== */
+  html, body {
+    overflow-y: auto !important;
+    overscroll-behavior-y: contain;
+  }
+
+  /* Keep the stage tall but not blocking scroll */
+  .stage {
+    min-height: 100vh;
+  }
+
+  /* Ensure progress bar + CTA never get clipped */
+  .player,
+  #frame,
+  #belowPlayerArea,
+  .go-end-wrap {
+    overflow: visible !important;
+  }
+
   /* ===== Offer mode (end screen) ===== */
   body.offer-mode .stage {
     justify-content: flex-start !important;
@@ -174,6 +193,10 @@
   }
 }
 
+/* ===== PIN overlay centering helper (when keyboard opens) ===== */
+
+
+
 /* ================= Fullscreen styles ================= */
 /* Mobile-only button inside the frame’s corner */
 #fsBtn {
@@ -193,13 +216,19 @@
 #fsBtn i { font-size: 18px; line-height: 36px; display: inline-block; }
 @media (max-width: 768px) { #fsBtn { display: inline-flex; align-items: center; justify-content: center; } }
 
-/* When fullscreen is active, shrink & pin the webcam inside the frame */
-body.fs-active #frame .webcam-wrap {
-  position: absolute !important;
-  width: var(--fs-webcam-size) !important;
-  height: var(--fs-webcam-size) !important;
-  right: var(--fs-webcam-corner-gap) !important;
-  bottom: var(--fs-webcam-corner-gap) !important;
-  transform: none !important;
-  z-index: 10030 !important;
+$1
+
+/* ===== Mobile: unstick the brand marquee so you can scroll to it ===== */
+@media (max-width: 768px) {
+  .brand-marquee {
+    position: static !important;
+    bottom: auto !important;
+    transform: none !important;
+    margin: 18px auto 24px;
+    opacity: 1; /* ensure visible when moved into flow */
+  }
+  .brand-marquee__inner { width: min(1100px, 94vw); }
+  /* keep a touch of spacing under CTAs so they never collide */
+  .end-cta__stack { padding-bottom: 12px; }
+  body.offer-mode .brand-marquee { position: static !important; }
 }

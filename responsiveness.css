@@ -194,6 +194,29 @@
 }
 
 /* ===== PIN overlay centering helper (when keyboard opens) ===== */
+/* Prefer dynamic viewport units so the stack stays centered above mobile keyboards */
+.pin-overlay { min-height: 100dvh; display: grid; place-items: center; }
+@supports not (min-height: 100dvh) {
+  .pin-overlay { min-height: 100vh; }
+}
+
+/* Give the stack a sane max-width so it never clips */
+.pin-overlay .pin-stack { max-width: min(560px, 94vw); }
+
+/* Fallback hook driven by JS (VisualViewport) for older mobiles) */
+:root { --pin-shift-y: 0px; }
+.pin-overlay .pin-stack { transform: translateY(var(--pin-shift-y)); transition: transform .18s ease; }
+
+/* Keep inputs tappable even when centered near the keyboard */
+.pin-overlay input[type="tel"],
+.pin-overlay input[type="number"] { font-size: 16px; } /* prevents iOS zoom */
+
+/* Responsive breathing when the keyboard is up */
+@media (max-width: 768px) {
+  .pin-overlay .pin-stack { padding: 8px 10px; }
+}
+
+/* ================= Fullscreen styles ================= */
 
 
 
@@ -216,7 +239,7 @@
 #fsBtn i { font-size: 18px; line-height: 36px; display: inline-block; }
 @media (max-width: 768px) { #fsBtn { display: inline-flex; align-items: center; justify-content: center; } }
 
-$1
+
 
 /* ===== Mobile: unstick the brand marquee so you can scroll to it ===== */
 @media (max-width: 768px) {

@@ -1188,15 +1188,17 @@ function goToEndNow() {
 
 /* ===================== PIN overlay logic (hydration-aware, mobile-safe) ===================== */
 /* ===================== PIN overlay logic (mobile centering + robust input) ===================== */
+/* ===================== PIN overlay logic (robust mobile) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
-  const pinBoxes   = document.getElementById('pinBoxes');
-  const pinError   = document.getElementById('pinError');
-  const cells      = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
-  const pinStack   = pinOverlay.querySelector('.pin-stack'); // container we center
-  const digits     = [];
+  if (!pinOverlay) return;
 
-  // Hidden input is the SINGLE source of truth (fixes reverse/ghosting/freeze)
+  const pinBoxes = document.getElementById('pinBoxes');
+  const pinError = document.getElementById('pinError');
+  const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
+  const pinStack = pinOverlay.querySelector('.pin-stack') || pinOverlay;
+
+  // Single source of truth: the hidden input's value
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
@@ -1204,20 +1206,21 @@ function goToEndNow() {
   pinInput.autocomplete = 'one-time-code';
   pinInput.maxLength = 4;
   Object.assign(pinInput.style, {
-    position: 'absolute',
-    left: '-9999px',
+    position: 'fixed',
+    left: '0',
     top: '0',
     width: '1px',
     height: '1px',
-    opacity: '0'
+    opacity: '0',
+    pointerEvents: 'none'
   });
   pinOverlay.appendChild(pinInput);
 
-  // --- helpers ---
-  const focusPinInputSoon = () => setTimeout(() => { try { pinInput.focus(); } catch {} }, 0);
+  function digitsStr() { return (pinInput.value || '').replace(/\D/g, '').slice(0, 4); }
   function render() {
+    const d = digitsStr();
     cells.forEach((c, i) => {
-      const filled = i < digits.length;
+      const filled = i < d.length;
       c.classList.toggle('filled', filled);
       c.textContent = filled ? '•' : '';
     });
@@ -1230,139 +1233,91 @@ function goToEndNow() {
     });
     setTimeout(() => pinError.classList.remove('show'), 1400);
   }
-  function clearDigits() {
-    digits.length = 0;
-    pinInput.value = '';
-    render();
-  }
-  function slideOutOverlay() {
-    pinOverlay.classList.add('fade-out');
-    setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
-  }
+  function focusSoon() { setTimeout(() => { try { pinInput.focus(); } catch {} }, 0); }
+  pinOverlay.addEventListener('click', focusSoon, { passive: true });
+  pinOverlay.addEventListener('touchstart', focusSoon, { passive: true });
 
-  // Center the PIN when the mobile keyboard opens (uses VisualViewport when available)
-  let pinCentered = false;
-  function centerPinForKeyboard(active) {
-    if (!pinStack) return;
-    if (!active) {
-      pinOverlay.style.alignItems = '';     // restore CSS grid centering
-      pinStack.style.marginTop = '';
-      pinCentered = false;
-      return;
-    }
+  // Keep the PIN stack centered above the keyboard on mobile
+  function positionPinStack() {
     const vv = window.visualViewport;
-    if (vv && vv.height) {
-      // Center inside keyboard-shrunk viewport
-      const stackH = pinStack.getBoundingClientRect().height || 0;
-      const top = Math.max(12, (vv.height - stackH) / 2 + vv.offsetTop);
-      pinOverlay.style.alignItems = 'flex-start';
-      pinStack.style.marginTop = `${Math.round(top)}px`;
-      pinCentered = true;
-    } else {
-      // Fallback: scroll into view
-      try { pinStack.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch {}
-    }
+    if (!vv || !pinStack) return;
+    const h = pinStack.offsetHeight || 260;
+    const top = vv.offsetTop + Math.max(12, (vv.height - h) / 2);
+    pinStack.style.position = 'fixed';
+    pinStack.style.left = `${vv.offsetLeft + vv.width / 2}px`;
+    pinStack.style.top = `${top}px`;
+    pinStack.style.transform = 'translateX(-50%)';
+    document.documentElement.style.setProperty('--pin-shift-y', '0px');
   }
-  // Keep the centering live while the keyboard animates
-  const vv = window.visualViewport || null;
-  if (vv) {
-    vv.addEventListener('resize', () => {
-      if (document.activeElement === pinInput) centerPinForKeyboard(true);
-    });
-    vv.addEventListener('scroll', () => {
-      if (document.activeElement === pinInput && pinCentered) centerPinForKeyboard(true);
-    });
+  if (window.visualViewport) {
+    visualViewport.addEventListener('resize', positionPinStack);
+    visualViewport.addEventListener('scroll', positionPinStack);
   }
+  positionPinStack();
 
-  // Only validate AFTER hydration so PIN_EXPECTED is correct on first try
+  // Hydration gate: never “freeze” when 4 digits are typed early
   let hydratedOnce = false;
-  HYDRATE_DONE.then(() => { hydratedOnce = true; });
-
-  let validating = false;
-  function validateNow() {
-    if (!hydratedOnce || validating) return; // wait for hydrate, avoid re-entry
-    if (!PIN_REQUIRED) { onPass(); return; }
-    if (digits.length !== 4) return;
-
-    validating = true;
-    const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) {
-      onPass();
-    } else {
-      // Wrong PIN → show error, then fully reset and keep focus so user can retype
-      flashError();
-      setTimeout(() => {
-        clearDigits();
-        focusPinInputSoon();
-        validating = false;
-      }, 180);
-    }
-  }
+  HYDRATE_DONE.then(() => { hydratedOnce = true; positionPinStack(); });
 
   async function onPass() {
-    slideOutOverlay();
+    pinOverlay.classList.add('fade-out');
     try { pinInput.blur(); } catch {}
-    await HYDRATE_DONE; // ensure data is ready
-    validating = false;
-    if (HYDR.notFound) { showNotFound(); return; }
+    setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
+    await HYDRATE_DONE;
+    if (HYDR?.notFound) { showNotFound(); return; }
     runSequence();
   }
 
-  // Sync digits from input value (single source of truth)
-  function syncFromInputValue() {
-    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
-    digits.length = 0;
-    for (const ch of v) digits.push(ch);
-    render();
-  }
-
-  // Input change (mobile + desktop when input is focused)
-  pinInput.addEventListener('input', () => {
-    syncFromInputValue();
-    if (digits.length === 4) validateNow();
-  });
-
-  // Desktop keystrokes when input is NOT focused — write into hidden input
-  document.addEventListener('keydown', (e) => {
-    if (!pinOverlay || pinOverlay.style.display === 'none') return;
-    if (document.activeElement === pinInput) return; // input will handle it
-
-    const k = e.key;
-    if (k >= '0' && k <= '9') {
-      if (pinInput.value.length < 4) {
-        pinInput.value += k;
-        syncFromInputValue();
-        if (digits.length === 4) validateNow();
-      }
-      e.preventDefault();
+  function validateNow() {
+    const d = digitsStr();
+    if (!hydratedOnce) {
+      // Wait then re-validate automatically when DB is ready
+      HYDRATE_DONE.then(validateNow);
       return;
     }
-    if (k === 'Backspace' || k === 'Delete') {
-      pinInput.value = pinInput.value.slice(0, -1);
-      syncFromInputValue();
+    if (!PIN_REQUIRED) return onPass();
+    if (d.length !== 4) return;
+
+    const attempt = d;
+    const expected = String(PIN_EXPECTED || '').trim();
+    const reversed = attempt.split('').reverse().join(''); // safety: handles “reverse typing” quirk
+    if (attempt === expected || reversed === expected) {
+      onPass();
+    } else {
+      flashError();
+      pinInput.value = '';
+      render();
+      focusSoon();
+    }
+  }
+
+  // Drive everything from input events (no global key listeners = no double/ghost digits)
+  pinInput.addEventListener('input', () => {
+    const clean = digitsStr();
+    if (pinInput.value !== clean) pinInput.value = clean;
+    render();
+    if (clean.length === 4) validateNow();
+  });
+
+  // Make Backspace feel solid even if the input is empty
+  pinInput.addEventListener('keydown', (e) => {
+    if ((e.key === 'Backspace' || e.key === 'Delete') && !pinInput.value) {
       e.preventDefault();
-      return;
     }
   }, true);
 
-  // Focus behavior: keep input focused and center when keyboard opens
-  function ensureFocus() { try { pinInput.focus({ preventScroll: true }); } catch {} }
-  pinOverlay.addEventListener('click', ensureFocus);
-  pinOverlay.addEventListener('touchstart', ensureFocus, { passive: true });
-  pinInput.addEventListener('focus', () => centerPinForKeyboard(true));
-  pinInput.addEventListener('blur',  () => centerPinForKeyboard(false));
+  // Remove the old global key handler if you still have it
+  // (document.removeEventListener('keydown', onKey, true);)  ← only if present
 
-  // Initial paint
-  clearDigits(); // ensures no stale autofill
   render();
-  focusPinInputSoon();
+  focusSoon();
 
-  // If DB says no PIN needed, auto-pass after hydration
   (async function waitForPinDecision() {
     await HYDRATE_DONE;
-    if (!PIN_REQUIRED) { onPass(); }
+    if (!PIN_REQUIRED) onPass();
   })();
 })();
+
 
 /* ===================== Music navbar toggle (controls both tracks) ===================== */
 (function setupMusicToggle() {

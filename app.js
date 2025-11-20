@@ -1189,6 +1189,7 @@ function goToEndNow() {
 /* ===================== PIN overlay logic (hydration-aware, mobile-safe) ===================== */
 /* ===================== PIN overlay logic (mobile centering + robust input) ===================== */
 /* ===================== PIN overlay logic (robust mobile) ===================== */
+/* ===================== PIN overlay logic (centered + solid mobile typing) ===================== */
 (function setupPin() {
   const pinOverlay = document.getElementById('pinOverlay');
   if (!pinOverlay) return;
@@ -1196,9 +1197,9 @@ function goToEndNow() {
   const pinBoxes = document.getElementById('pinBoxes');
   const pinError = document.getElementById('pinError');
   const cells = Array.from(pinBoxes.querySelectorAll('.pin-digit'));
-  const pinStack = pinOverlay.querySelector('.pin-stack') || pinOverlay;
+  const digits = [];
 
-  // Single source of truth: the hidden input's value
+  // Hidden, mobile-friendly numeric input
   const pinInput = document.createElement('input');
   pinInput.type = 'tel';
   pinInput.inputMode = 'numeric';
@@ -1206,108 +1207,77 @@ function goToEndNow() {
   pinInput.autocomplete = 'one-time-code';
   pinInput.maxLength = 4;
   Object.assign(pinInput.style, {
-    position: 'fixed',
-    left: '0',
-    top: '0',
-    width: '1px',
-    height: '1px',
-    opacity: '0',
-    pointerEvents: 'none'
+    position: 'absolute', left: '-9999px', top: '0',
+    width: '1px', height: '1px', opacity: '0'
   });
   pinOverlay.appendChild(pinInput);
 
-  function digitsStr() { return (pinInput.value || '').replace(/\D/g, '').slice(0, 4); }
-  function render() {
-    const d = digitsStr();
+  const render = () => {
     cells.forEach((c, i) => {
-      const filled = i < d.length;
+      const filled = i < digits.length;
       c.classList.toggle('filled', filled);
       c.textContent = filled ? '•' : '';
     });
-  }
-  function flashError() {
+  };
+  const focusSoon = () => setTimeout(() => { try { pinInput.focus(); } catch {} }, 0);
+  const clearDigits = () => { digits.length = 0; pinInput.value = ''; render(); };
+  const flashError = () => {
     pinError.classList.add('show');
-    cells.forEach(c => {
-      c.classList.add('pulse');
-      setTimeout(() => c.classList.remove('pulse'), 900);
-    });
+    cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); });
     setTimeout(() => pinError.classList.remove('show'), 1400);
-  }
-  function focusSoon() { setTimeout(() => { try { pinInput.focus(); } catch {} }, 0); }
-  pinOverlay.addEventListener('click', focusSoon, { passive: true });
-  pinOverlay.addEventListener('touchstart', focusSoon, { passive: true });
+  };
 
-  // Keep the PIN stack centered above the keyboard on mobile
-  function positionPinStack() {
-    const vv = window.visualViewport;
-    if (!vv || !pinStack) return;
-    const h = pinStack.offsetHeight || 260;
-    const top = vv.offsetTop + Math.max(12, (vv.height - h) / 2);
-    pinStack.style.position = 'fixed';
-    pinStack.style.left = `${vv.offsetLeft + vv.width / 2}px`;
-    pinStack.style.top = `${top}px`;
-    pinStack.style.transform = 'translateX(-50%)';
-    document.documentElement.style.setProperty('--pin-shift-y', '0px');
-  }
-  if (window.visualViewport) {
-    visualViewport.addEventListener('resize', positionPinStack);
-    visualViewport.addEventListener('scroll', positionPinStack);
-  }
-  positionPinStack();
-
-  // Hydration gate: never “freeze” when 4 digits are typed early
+  // Wait for cloud hydrate so the first attempt uses the real PIN
   let hydratedOnce = false;
-  HYDRATE_DONE.then(() => { hydratedOnce = true; positionPinStack(); });
+  HYDRATE_DONE.then(() => { hydratedOnce = true; });
+
+  function validateNow() {
+    if (!hydratedOnce) return;              // ignore until data is ready
+    if (!PIN_REQUIRED) { onPass(); return; }
+    if (digits.length !== 4) return;
+
+    const attempt = digits.join('');
+    if (String(attempt) === String(PIN_EXPECTED)) onPass();
+    else {
+      flashError();
+      setTimeout(() => { clearDigits(); focusSoon(); }, 180);
+    }
+  }
 
   async function onPass() {
     pinOverlay.classList.add('fade-out');
-    try { pinInput.blur(); } catch {}
     setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
+    try { pinInput.blur(); } catch {}
     await HYDRATE_DONE;
-    if (HYDR?.notFound) { showNotFound(); return; }
+    if (HYDR.notFound) { showNotFound(); return; }
     runSequence();
   }
 
-  function validateNow() {
-    const d = digitsStr();
-    if (!hydratedOnce) {
-      // Wait then re-validate automatically when DB is ready
-      HYDRATE_DONE.then(validateNow);
-      return;
-    }
-    if (!PIN_REQUIRED) return onPass();
-    if (d.length !== 4) return;
-
-    const attempt = d;
-    const expected = String(PIN_EXPECTED || '').trim();
-    const reversed = attempt.split('').reverse().join(''); // safety: handles “reverse typing” quirk
-    if (attempt === expected || reversed === expected) {
-      onPass();
-    } else {
-      flashError();
-      pinInput.value = '';
-      render();
-      focusSoon();
-    }
-  }
-
-  // Drive everything from input events (no global key listeners = no double/ghost digits)
+  // Drive state only from the hidden input (fixes reverse/ghost/delete issues)
   pinInput.addEventListener('input', () => {
-    const clean = digitsStr();
-    if (pinInput.value !== clean) pinInput.value = clean;
+    const v = (pinInput.value || '').replace(/\D/g, '').slice(0, 4);
+    digits.length = 0;
+    for (let i = 0; i < v.length; i++) digits.push(v[i]); // append in natural order
     render();
-    if (clean.length === 4) validateNow();
+    if (digits.length === 4) validateNow();
   });
 
-  // Make Backspace feel solid even if the input is empty
-  pinInput.addEventListener('keydown', (e) => {
-    if ((e.key === 'Backspace' || e.key === 'Delete') && !pinInput.value) {
+  // Desktop convenience: allow typing when input isn’t focused
+  document.addEventListener('keydown', (e) => {
+    if (document.activeElement === pinInput) return;  // let input handle it
+    const k = e.key;
+    if (k >= '0' && k <= '9') {
+      if (digits.length < 4) { digits.push(k); render(); if (digits.length === 4) validateNow(); }
+      e.preventDefault();
+    } else if (k === 'Backspace' || k === 'Delete') {
+      if (digits.length) { digits.pop(); render(); }
       e.preventDefault();
     }
   }, true);
 
-  // Remove the old global key handler if you still have it
-  // (document.removeEventListener('keydown', onKey, true);)  ← only if present
+  // Basic focus affordance
+  pinOverlay.addEventListener('click', focusSoon, { passive: true });
+  pinOverlay.addEventListener('touchstart', focusSoon, { passive: true });
 
   render();
   focusSoon();
@@ -1316,6 +1286,19 @@ function goToEndNow() {
     await HYDRATE_DONE;
     if (!PIN_REQUIRED) onPass();
   })();
+
+  // Keep the PIN stack centered when the keyboard opens (mobile)
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const updateShift = () => {
+      const keyboard = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      const shift = keyboard > 0 ? -(keyboard / 2) : 0; // nudge up by half the keyboard
+      document.documentElement.style.setProperty('--pin-shift-y', `${Math.round(shift)}px`);
+    };
+    vv.addEventListener('resize', updateShift);
+    vv.addEventListener('scroll', updateShift);
+    updateShift();
+  }
 })();
 
 

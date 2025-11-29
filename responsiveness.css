@@ -20,7 +20,7 @@
   --topdock-margin-top: 50px;
 
   /* space under nav/timer → webcam */
-   --topdock-margin-bottom: 12px;
+   --topdock-margin-bottom: 0px;
   /* space under webcam → offer */
   --topdock-padding-x: 12px;
   /* left/right padding inside dock */
@@ -40,7 +40,7 @@
   --webcam-preoffer-max: 260px;
 
   /* Offer CTA block */
-  --endcta-margin-top: 4px;
+  --endcta-margin-top: 0px;
   --endcta-max-w-px: 960px;
   --endcta-max-w-vw: 94vw;
 
@@ -73,18 +73,15 @@
 
 /* Desktop defaults */
 :root {
-  --intrigue-gap-top: -200px;
-  /* distance from NAV → Intrigue */
-  --intrigue-gap-bottom: -200px;
-  /* distance from Intrigue → Player */
+ --intrigue-gap-top: 0px;   /* small gap under navbar on desktop */
+  --intrigue-gap-bottom: 0px;/* small gap above the player */
 }
 
 /* Mobile overrides (optional) */
 @media (max-width: 768px) {
-  :root {
-     --intrigue-gap-top: 4px;   /* closer to navbar */
-    --intrigue-gap-bottom: 6px;/* closer to player */
-    /* Intrigue → Player on mobile */
+   :root {
+    --intrigue-gap-top: 0px;  /* closer to navbar on mobile */
+    --intrigue-gap-bottom: 0px;
   }
 }
 

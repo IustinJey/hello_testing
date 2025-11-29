@@ -212,7 +212,7 @@ function tick() {
   if (navCountdown) navCountdown.textContent = t;
   if (separateCountdown) separateCountdown.textContent = t;
   if (ctaCountdownEl) ctaCountdownEl.textContent = t;
-  if (remain <= 0) { try { mainVideo.pause(); } catch (e) { } }
+  // if (remain <= 0) { try { mainVideo.pause(); } catch (e) { } }
 }
 setInterval(tick, 1000);
 tick();
@@ -1283,15 +1283,44 @@ function goToEndNow() {
     runSequence();
   }
 
-  // Input-driven (single source of truth) — prevents reverse/duplicate keys on mobile
-  pinInput.addEventListener('input', () => {
-    setDigitsFromString(pinInput.value);
-    if (digits.length === 4) validateNow();
-    playPinSound();
-  });
+  // Keydown = normal typing; input = paste / OTP only
   pinInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Backspace' || e.key === 'Delete') { setTimeout(() => setDigitsFromString(pinInput.value), 0); playPinSound(); }
-    if (e.key === 'Enter') { e.preventDefault(); validateNow(); }
+    const k = e.key;
+    if (k === 'Backspace' || k === 'Delete') {
+      e.preventDefault();
+      if (digits.length > 0) {
+        digits.pop();
+        render();
+        playPinSound();
+      }
+      return;
+    }
+    if (k === 'Enter') {
+      e.preventDefault();
+      validateNow();
+      return;
+    }
+    if (/^[0-9]$/.test(k)) {
+      e.preventDefault();
+      if (digits.length < 4) {
+        digits.push(k);
+        render();
+        playPinSound();
+        if (digits.length === 4) validateNow();
+      }
+    }
+  });
+
+  pinInput.addEventListener('input', (e) => {
+    const it = e.inputType || '';
+    const val = pinInput.value;
+    // Handle paste / OTP auto-fill where keydown may not fire, or multiple digits at once
+    if (it === 'insertFromPaste' || it === 'insertReplacementText' || (val && val.length > 1)) {
+      setDigitsFromString(val);
+      pinInput.value = '';
+      if (digits.length === 4) validateNow();
+      playPinSound();
+    }
   });
 
   // ⛔️ Remove global keydown handling — it caused reversed order on mobile
@@ -1317,7 +1346,7 @@ function goToEndNow() {
         position: 'fixed',
         left: `${Math.round(window.innerWidth / 2)}px`,
         top: `${Math.round(targetY)}px`,
-        transform: 'translate(-50%, -50%)',
+        transform: "translate(-50%, -50%)",
       });
       pinOverlay.classList.add('active');
     } else {

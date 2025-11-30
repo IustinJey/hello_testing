@@ -483,10 +483,11 @@ body.fs-active #frame .webcam-wrap {
 
   /* Player section should not hard-lock to viewport height on phones */
   .stage {
+    align-items: flex-start;                  /* stop vertical centering */
+    padding-top: calc(var(--nav-height) + 8px); /* small gap under navbar */
     min-height: 100svh;
-    /* fills first screen but allows scroll */
     height: auto;
-    padding-bottom: 22px;
+    padding-bottom: 22px;                     /* keep your existing bottom */
   }
 
   /* 2) Brand/Trusted-by becomes normal flow (not fixed) with a touch hitbox */

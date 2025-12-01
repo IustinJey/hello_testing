@@ -1212,6 +1212,10 @@ function goToEndNow() {
 
 /* ===================== PIN overlay logic (now waits for hydration + mobile-safe) ===================== */
 (function setupPin() {
+  // prevent double-setup if app.js is ever injected twice
+  if (window.__PIN_SETUP_DONE) return;
+  window.__PIN_SETUP_DONE = true;
+
   const pinOverlay = document.getElementById('pinOverlay');
   const pinBoxes = document.getElementById('pinBoxes');
   const pinError = document.getElementById('pinError');
@@ -1256,12 +1260,6 @@ function goToEndNow() {
     pinInput.value = '';
     render();
   }
-  function setDigitsFromString(v) {
-    const s = String(v || '').replace(/\D/g, '').slice(0, 4);
-    digits.length = 0;
-    for (const ch of s) digits.push(ch);
-    render();
-  }
 
   // Only validate AFTER hydration so PIN_EXPECTED is correct on first try
   let hydratedOnce = false;
@@ -1283,48 +1281,42 @@ function goToEndNow() {
     runSequence();
   }
 
-  // Keydown = normal typing; input = paste / OTP only
+  // NEW: purely append digits on input, never prepend, and clear field each time
+  pinInput.addEventListener('input', (e) => {
+    let raw = pinInput.value || '';
+    let source = '';
+
+    if (typeof e?.data === 'string' && e.data.length > 0) {
+      source = e.data;
+    } else if (raw.length > 0) {
+      // covers OTP / auto-fill cases where whole code appears at once
+      source = raw;
+      digits.length = 0; // rebuild from scratch in this case
+    }
+
+    const nums = String(source).replace(/\D/g, '');
+    for (const ch of nums) {
+      if (digits.length >= 4) break;
+      digits.push(ch);
+    }
+
+    pinInput.value = ''; // keep actual input empty to avoid weird cursor behavior
+    render();
+    if (digits.length === 4) validateNow();
+    playPinSound();
+  });
+
   pinInput.addEventListener('keydown', (e) => {
-    const k = e.key;
-    if (k === 'Backspace' || k === 'Delete') {
+    if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
       if (digits.length > 0) {
         digits.pop();
         render();
         playPinSound();
       }
-      return;
     }
-    if (k === 'Enter') {
-      e.preventDefault();
-      validateNow();
-      return;
-    }
-    if (/^[0-9]$/.test(k)) {
-      e.preventDefault();
-      if (digits.length < 4) {
-        digits.push(k);
-        render();
-        playPinSound();
-        if (digits.length === 4) validateNow();
-      }
-    }
+    if (e.key === 'Enter') { e.preventDefault(); validateNow(); }
   });
-
-  pinInput.addEventListener('input', (e) => {
-    const it = e.inputType || '';
-    const val = pinInput.value;
-    // Handle paste / OTP auto-fill where keydown may not fire, or multiple digits at once
-    if (it === 'insertFromPaste' || it === 'insertReplacementText' || (val && val.length > 1)) {
-      setDigitsFromString(val);
-      pinInput.value = '';
-      if (digits.length === 4) validateNow();
-      playPinSound();
-    }
-  });
-
-  // ⛔️ Remove global keydown handling — it caused reversed order on mobile
-  // document.removeEventListener('keydown', onKey, true);
 
   render();
   focusPinInputSoon();
@@ -1341,12 +1333,13 @@ function goToEndNow() {
     const keyboardOpen = vv.height < window.innerHeight * 0.85;
 
     if (keyboardOpen) {
-      const targetY = vv.pageTop + vv.height * 0.38; // a bit above the keyboard
+      // Center between top of visible viewport and keyboard
+      const targetY = vv.pageTop + vv.height * 0.5;
       Object.assign(pinStack.style, {
         position: 'fixed',
         left: `${Math.round(window.innerWidth / 2)}px`,
         top: `${Math.round(targetY)}px`,
-        transform: "translate(-50%, -50%)",
+        transform: 'translate(-50%, -50%)',
       });
       pinOverlay.classList.add('active');
     } else {
@@ -1365,6 +1358,7 @@ function goToEndNow() {
   }
   repositionPinForKeyboard();
 })();
+
 
 /* ===================== Music navbar toggle (controls both tracks) ===================== */
 (function setupMusicToggle() {

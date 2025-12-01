@@ -16,11 +16,11 @@
   /* base navbar height from style.css */
 
   /* Mobile — OFFER (end screen) defaults */
-    --offer-stage-top-padding-mobile: 76px;
-  --topdock-margin-top: 50px;
+  --offer-stage-top-padding-mobile: 76px;
+  --topdock-margin-top: 10px;
 
   /* space under nav/timer → webcam */
-   --topdock-margin-bottom: 0px;
+  --topdock-margin-bottom: 50px;
   /* space under webcam → offer */
   --topdock-padding-x: 12px;
   /* left/right padding inside dock */
@@ -73,14 +73,17 @@
 
 /* Desktop defaults */
 :root {
- --intrigue-gap-top: 0px;   /* small gap under navbar on desktop */
-  --intrigue-gap-bottom: 0px;/* small gap above the player */
+  --intrigue-gap-top: 0px;
+  /* small gap under navbar on desktop */
+  --intrigue-gap-bottom: 0px;
+  /* small gap above the player */
 }
 
 /* Mobile overrides (optional) */
 @media (max-width: 768px) {
-   :root {
-    --intrigue-gap-top: 0px;  /* closer to navbar on mobile */
+  :root {
+    --intrigue-gap-top: 0px;
+    /* closer to navbar on mobile */
     --intrigue-gap-bottom: 0px;
   }
 }
@@ -111,7 +114,7 @@
     min-height: 100vh;
   }
 
-  #topDock {
+   body.offer-mode #topDock {
     display: block;
     width: 100%;
     margin: var(--topdock-margin-top) auto var(--topdock-margin-bottom);
@@ -482,13 +485,15 @@ body.fs-active #frame .webcam-wrap {
   }
 
   /* Player section should not hard-lock to viewport height on phones */
+  /* Stack children of .stage vertically and align them to the top */
   .stage {
-    align-items: flex-start;                  /* stop vertical centering */
-    padding-top: calc(var(--nav-height) + 8px); /* small gap under navbar */
-    min-height: 100svh;
-    height: auto;
-    padding-bottom: 22px;                     /* keep your existing bottom */
+    flex-direction: column;
+    justify-content: flex-start;
+    /* ⬅ stop vertical centering */
+    padding-top: calc(var(--nav-height) + 8px);
+    /* ⬅ small gap under navbar */
   }
+
 
   /* 2) Brand/Trusted-by becomes normal flow (not fixed) with a touch hitbox */
   .brand-marquee {
@@ -510,6 +515,11 @@ body.fs-active #frame .webcam-wrap {
     margin-bottom: 8px;
 
   }
+
+  body.offer-mode .intrigue {
+  display: none !important;
+}
+
 
   .brand-marquee__inner {
     width: min(1100px, 92vw);

@@ -1244,9 +1244,22 @@ function goToEndNow() {
   pinOverlay.addEventListener('click', focusPinInputSoon);
   pinOverlay.addEventListener('touchstart', focusPinInputSoon, { passive: true });
 
-  function playPinSound() { if (!sfxPin) return; try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { } }
-  function flashError() { pinError.classList.add('show'); cells.forEach(c => { c.classList.add('pulse'); setTimeout(() => c.classList.remove('pulse'), 900); }); setTimeout(() => pinError.classList.remove('show'), 1400); }
-  function slideOutOverlay() { pinOverlay.classList.add('fade-out'); setTimeout(() => { pinOverlay.style.display = 'none'; }, 380); }
+  function playPinSound() {
+    if (!sfxPin) return;
+    try { sfxPin.currentTime = 0; sfxPin.play().catch(() => { }); } catch { }
+  }
+  function flashError() {
+    pinError.classList.add('show');
+    cells.forEach(c => {
+      c.classList.add('pulse');
+      setTimeout(() => c.classList.remove('pulse'), 900);
+    });
+    setTimeout(() => pinError.classList.remove('show'), 1400);
+  }
+  function slideOutOverlay() {
+    pinOverlay.classList.add('fade-out');
+    setTimeout(() => { pinOverlay.style.display = 'none'; }, 380);
+  }
 
   function render() {
     cells.forEach((c, i) => {
@@ -1270,9 +1283,14 @@ function goToEndNow() {
     if (!PIN_REQUIRED) { onPass(); return; }
     if (digits.length !== 4) return;
     const attempt = digits.join('');
-    if (String(attempt) === String(PIN_EXPECTED)) { onPass(); }
-    else { flashError(); setTimeout(() => { clearDigits(); focusPinInputSoon(); }, 180); }
+    if (String(attempt) === String(PIN_EXPECTED)) {
+      onPass();
+    } else {
+      flashError();
+      setTimeout(() => { clearDigits(); focusPinInputSoon(); }, 180);
+    }
   }
+
   async function onPass() {
     slideOutOverlay();
     try { pinInput.blur(); } catch { }
@@ -1281,41 +1299,31 @@ function goToEndNow() {
     runSequence();
   }
 
-  // NEW: purely append digits on input, never prepend, and clear field each time
-  pinInput.addEventListener('input', (e) => {
-    let raw = pinInput.value || '';
-    let source = '';
+  // NEW: rebuild digits from the real input value on every input
+  pinInput.addEventListener('input', () => {
+    const raw = pinInput.value || '';
+    const cleaned = raw.replace(/\D/g, '').slice(0, 4);
 
-    if (typeof e?.data === 'string' && e.data.length > 0) {
-      source = e.data;
-    } else if (raw.length > 0) {
-      // covers OTP / auto-fill cases where whole code appears at once
-      source = raw;
-      digits.length = 0; // rebuild from scratch in this case
-    }
+    digits.length = 0;
+    for (const ch of cleaned) digits.push(ch);
 
-    const nums = String(source).replace(/\D/g, '');
-    for (const ch of nums) {
-      if (digits.length >= 4) break;
-      digits.push(ch);
-    }
-
-    pinInput.value = ''; // keep actual input empty to avoid weird cursor behavior
+    pinInput.value = cleaned; // keep actual value so mobile backspace works
     render();
+
     if (digits.length === 4) validateNow();
-    playPinSound();
+    if (cleaned.length) playPinSound();
   });
 
   pinInput.addEventListener('keydown', (e) => {
     if (e.key === 'Backspace' || e.key === 'Delete') {
-      e.preventDefault();
-      if (digits.length > 0) {
-        digits.pop();
-        render();
-        playPinSound();
-      }
+      // Let the browser modify the value; we'll sync digits in the input handler
+      playPinSound();
+      return;
     }
-    if (e.key === 'Enter') { e.preventDefault(); validateNow(); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      validateNow();
+    }
   });
 
   render();
@@ -1328,13 +1336,12 @@ function goToEndNow() {
 
   // Keep the PIN stack centered in visible viewport when keyboard opens (mobile)
   function repositionPinForKeyboard() {
-    if (!window.visualViewport || !pinStack || !pinOverlay) return;
-    const vv = visualViewport;
-    const keyboardOpen = vv.height < window.innerHeight * 0.85;
+    if (!pinStack || !pinOverlay) return;
 
-    if (keyboardOpen) {
-      // Center between top of visible viewport and keyboard
+    if (window.visualViewport) {
+      const vv = visualViewport;
       const targetY = vv.pageTop + vv.height * 0.5;
+
       Object.assign(pinStack.style, {
         position: 'fixed',
         left: `${Math.round(window.innerWidth / 2)}px`,
@@ -1343,19 +1350,23 @@ function goToEndNow() {
       });
       pinOverlay.classList.add('active');
     } else {
-      // restore default centering
-      pinStack.style.position = '';
-      pinStack.style.left = '';
-      pinStack.style.top = '';
-      pinStack.style.transform = '';
-      pinOverlay.classList.remove('active');
+      // Fallback: center in window
+      Object.assign(pinStack.style, {
+        position: 'fixed',
+        left: '50%',
+        top: '50%',
+        transform: 'translate(-50%, -50%)',
+      });
+      pinOverlay.classList.add('active');
     }
   }
+
   if (window.visualViewport) {
     visualViewport.addEventListener('resize', repositionPinForKeyboard);
     visualViewport.addEventListener('scroll', repositionPinForKeyboard);
-    window.addEventListener('orientationchange', () => setTimeout(repositionPinForKeyboard, 120));
   }
+  window.addEventListener('orientationchange', () => setTimeout(repositionPinForKeyboard, 120));
+
   repositionPinForKeyboard();
 })();
 
